@@ -1,0 +1,54 @@
+<!doctype html>
+<!-- Notion site banner: 1500 x 600. Render with headless Edge at exactly that window size. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LocHub banner</title>
+<style>
+  html, body { margin: 0; padding: 0; }
+  body {
+    width: 1500px;
+    height: 600px;
+    overflow: hidden;
+    font-family: system-ui, 'Segoe UI', sans-serif;
+    background: radial-gradient(circle at 24% 50%, #1f3f86 0%, #13254d 45%, #0b1630 100%);
+    color: #ffffff;
+    display: flex;
+    align-items: center;
+    gap: 64px;
+    padding: 0 150px;
+    box-sizing: border-box;
+  }
+  .mark { width: 340px; height: 340px; flex: none; filter: drop-shadow(0 8px 18px rgba(0, 0, 0, 0.35)); }
+  .text { display: flex; flex-direction: column; gap: 22px; }
+  h1 { margin: 0; font-size: 132px; font-weight: 700; letter-spacing: -2px; line-height: 1; }
+  p { margin: 0; font-size: 46px; line-height: 1.25; color: #c7d7ff; }
+  .langs { display: flex; gap: 16px; margin-top: 14px; }
+  .langs span {
+    font-size: 34px; font-weight: 700; letter-spacing: 1px;
+    padding: 8px 20px; border-radius: 12px;
+    background: rgba(255, 138, 61, 0.16); color: #ffb07a; border: 1px solid rgba(255, 138, 61, 0.45);
+  }
+</style>
+</head>
+<body>
+  <svg class="mark" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+    <path d="M 30 12 L 98 12 A 20 20 0 0 1 118 32 L 118 72 A 20 20 0 0 1 98 92
+             L 46 92 L 18 116 L 30 92
+             A 20 20 0 0 1 10 72 L 10 32 A 20 20 0 0 1 30 12 Z"
+          fill="#2F6FED" stroke="#1B4A8C" stroke-width="3" stroke-linejoin="round"/>
+    <circle cx="64" cy="54" r="34" fill="#FFFFFF" stroke="#2F6FED" stroke-width="3"/>
+    <ellipse cx="64" cy="54" rx="14" ry="34" fill="none" stroke="#2F6FED" stroke-width="2.5"/>
+    <line x1="30" y1="54" x2="98" y2="54" stroke="#2F6FED" stroke-width="3" stroke-linecap="round"/>
+    <line x1="40" y1="38" x2="88" y2="38" stroke="#2F6FED" stroke-width="2" stroke-linecap="round"/>
+    <line x1="40" y1="70" x2="88" y2="70" stroke="#2F6FED" stroke-width="2" stroke-linecap="round"/>
+    <circle cx="50" cy="42" r="4.5" fill="#FF8A3D"/>
+    <circle cx="80" cy="66" r="4.5" fill="#FF8A3D"/>
+  </svg>
+  <div class="text">
+    <h1>LocHub</h1>
+    <p>AI-assisted localization<br>for Unreal Engine</p>
+    <div class="langs"><span>DE</span><span>FR</span><span>ES</span><span>JA</span><span>KO</span><span>ZH</span><span>RU</span></div>
+  </div>
+</body>
+</html>

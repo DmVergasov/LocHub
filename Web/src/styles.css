@@ -1,0 +1,1037 @@
+:root {
+  --bg: #f6f7f8;
+  --panel: #ffffff;
+  --panel-2: #f0f1f3;
+  --text: #1e1f21;
+  --muted: #6d6e6f;
+  --border: #e0e0e0;
+  --accent: #4573d2;
+  --accent-soft: rgba(69, 115, 210, 0.12);
+  --red: #e8384f;
+  --yellow: #f1bd6c;
+  --green: #5da283;
+  --purple: #aa62e3;
+  --empty: #b8bfcc;
+  /* Semantic aliases kept so older rules (chips, band bars, cell tones) keep working unchanged. */
+  --band-r: var(--red);
+  --band-y: var(--yellow);
+  --band-g: var(--green);
+  --done: var(--green);
+  --outdated: var(--purple);
+  color-scheme: light;
+  font-family: system-ui, 'Segoe UI', sans-serif;
+  font-size: 14px;
+}
+
+:root[data-theme='dark'] {
+  --bg: #1e1f21;
+  --panel: #2a2b2d;
+  --panel-2: #313235;
+  --text: #f5f4f3;
+  --muted: #a2a0a2;
+  --border: #424244;
+  --accent: #4573d2;
+  --accent-soft: rgba(69, 115, 210, 0.22);
+  --empty: #5a5a5a;
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  /* Only the OS-follow default ('auto'); an explicit 'light' or 'dark' (the header toggle) is never touched here. */
+  :root[data-theme='auto'] {
+    --bg: #1e1f21;
+    --panel: #2a2b2d;
+    --panel-2: #313235;
+    --text: #f5f4f3;
+    --muted: #a2a0a2;
+    --border: #424244;
+    --accent: #4573d2;
+    --accent-soft: rgba(69, 115, 210, 0.22);
+    --empty: #5a5a5a;
+    color-scheme: dark;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  overflow-x: hidden; /* only the grid's own .grid-scroll may scroll horizontally */
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+  border-radius: 6px;
+}
+
+input,
+select,
+textarea {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+}
+
+/* The native <select> popup keeps the OS's own background in CEF regardless of `color-scheme`, and `select {
+   color: inherit }` alone leaves light-grey text on a white popup there; give every option an explicit, readable
+   pair per theme, plus a checked/hover state that stays readable too. */
+option,
+optgroup {
+  background-color: var(--panel);
+  color: var(--text);
+}
+
+option:checked,
+option:hover {
+  background-color: var(--accent);
+  color: #ffffff;
+}
+
+/* Secondary/ghost look, the default for every button in the app; `.primary` is the one exception. */
+button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+a {
+  color: var(--accent);
+}
+
+code {
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+.muted,
+.empty {
+  color: var(--muted);
+}
+
+/* ---- Header ------------------------------------------------------------ */
+
+.top {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.top-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.top-row .spacer {
+  flex: 1 1 auto;
+  min-width: 8px;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 16px;
+}
+
+.brand-logo {
+  flex: none;
+  width: 20px;
+  height: 20px;
+}
+
+.context-line {
+  font-size: 13px;
+}
+
+.top nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.top nav a {
+  text-decoration: none;
+  color: var(--muted);
+  padding: 6px 12px;
+  border-radius: 999px;
+}
+
+.top nav a:hover {
+  background: var(--panel-2);
+}
+
+.top nav a[aria-current='page'] {
+  background: var(--accent-soft);
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* Small status pills with a coloured dot; the classes below (route-direct/relay, warning) are the existing ones
+   from App.tsx, reused as-is so no markup change was needed for the restyle. */
+.editor-status,
+.ai-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.editor-status::before,
+.ai-status::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.editor-status.route-direct,
+.editor-status.route-relay {
+  color: var(--green);
+}
+
+.editor-status.route-direct::before,
+.editor-status.route-relay::before {
+  background: var(--green);
+}
+
+.ai-status.warning {
+  color: var(--yellow);
+  font-weight: 600;
+}
+
+.ai-status.warning::before {
+  background: var(--yellow);
+}
+
+/* Full-height flex column: only the grid's own .grid-scroll scrolls (see below); the document itself never does.
+   Other views (Queue, Jobs, ...) are plain block content here, so `overflow: auto` lets them scroll inside main
+   instead of growing the page when they are taller than the viewport. */
+.app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+main {
+  padding: 20px 24px;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+
+.error {
+  color: var(--red);
+  background: rgba(232, 56, 79, 0.1);
+  border: 1px solid var(--red);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 12px 0;
+}
+
+.notice {
+  color: var(--green);
+}
+
+.notice.warning {
+  color: var(--yellow);
+  background: rgba(241, 189, 108, 0.1);
+  border: 1px solid var(--yellow);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 12px 0;
+}
+
+.banner.stale {
+  color: var(--yellow);
+  background: rgba(241, 189, 108, 0.1);
+  border: 1px solid var(--yellow);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 12px 0;
+}
+
+.sync-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.sync-result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 8px 12px;
+  margin: 12px 0;
+}
+
+.sync-result.ok {
+  border-color: var(--green);
+  background: rgba(93, 162, 131, 0.12);
+}
+
+.sync-result.cancelled {
+  border-color: var(--border);
+  background: var(--panel-2);
+}
+
+.sync-result.failed {
+  border-color: var(--red);
+  background: rgba(232, 56, 79, 0.12);
+}
+
+.sync-result details {
+  flex-basis: 100%;
+}
+
+/* ---- Panels shared by Queue, Glossary, Jobs, Coverage, Summary, Inbox, Card view ---------------------------- */
+
+.coverage,
+.summary,
+.jobs,
+.inbox,
+.glossary,
+.queue,
+.card-view {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+main h2,
+main h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: none;
+  margin: 0 0 8px;
+}
+
+/* ---- Job progress bar ----------------------------------------------------- */
+
+.job-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.job-progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.job-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+.job-progress-label {
+  font-size: 12px;
+}
+
+/* ---- Toolbar pill filters ------------------------------------------------ */
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.search-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.search-wrap::before {
+  content: '⌕';
+  position: absolute;
+  left: 10px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.toolbar input[type='search'] {
+  min-width: 260px;
+  padding-left: 26px;
+  border-radius: 999px;
+}
+
+.filter-pill,
+.columns-picker .columns-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.filter-pill {
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  padding: 2px 4px 2px 12px;
+}
+
+.filter-pill select {
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filter-pill.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.filter-pill.toggle-chip {
+  padding: 4px 12px;
+}
+
+.filter-pill.toggle-chip label {
+  cursor: pointer;
+}
+
+.filter-clear {
+  border: none;
+  background: transparent;
+  border-radius: 50%;
+  padding: 0 4px;
+  color: inherit;
+  line-height: 1;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* PathFilter (path/folder filter): styled as a filter pill (see .filter-pill above) with its own
+   suggestion popover, following .columns-popover's look. Used for the Grid toolbar's Asset filter and Jobs'
+   Group filter. */
+.path-filter {
+  position: relative;
+}
+
+.path-filter input {
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  max-width: 280px;
+  min-width: 140px;
+}
+
+.path-filter-popover {
+  position: absolute;
+  z-index: 20;
+  top: 100%;
+  left: 0;
+  margin: 4px 0 0;
+  padding: 6px;
+  min-width: 260px;
+  max-width: 420px;
+  max-height: 260px;
+  overflow-y: auto;
+  display: grid;
+  gap: 2px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  list-style: none;
+}
+
+.path-filter-popover button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  padding: 4px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.path-filter-popover button.active,
+.path-filter-popover button:hover {
+  background: var(--panel-2);
+}
+
+.columns-picker {
+  position: relative;
+}
+
+.columns-toggle {
+  border-radius: 999px;
+  background: var(--panel);
+  padding: 4px 12px;
+}
+
+.columns-popover {
+  position: absolute;
+  z-index: 20;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  min-width: 140px;
+  max-height: 260px;
+  overflow-y: auto;
+  display: grid;
+  gap: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+
+.columns-popover label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.toolbar .count {
+  margin-left: auto;
+  color: var(--muted);
+}
+
+/* ---- Grid ---------------------------------------------------------------- */
+
+/* Fills the height main gives it; only .grid-scroll below scrolls. */
+.grid-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.grid-header,
+.grid-row {
+  display: grid;
+  gap: 4px;
+  align-items: center;
+}
+
+/* Header and body stretch to the scroller's width instead of carrying a fixed pixel width (GridView.tsx gives
+   each a `min-width` inline, computed from the visible columns, so the horizontal scrollbar appears only once
+   the columns hit their floor). Rows stay full-width via `.grid-row`'s own `left: 0; right: 0` below. */
+.grid-header,
+.grid-body {
+  width: 100%;
+}
+
+/* Sticky inside the single scroller (.grid-scroll), pinned above the virtualized body so header and body always
+   scroll together on both axes; opaque background keeps rows from showing through underneath it. */
+.grid-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 36px; /* kept equal to GRID_HEADER_HEIGHT in GridView.tsx: change one, change the other */
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.grid-header .focus {
+  color: var(--accent);
+}
+
+.grid-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.grid-body {
+  position: relative;
+}
+
+.grid-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.grid-row:hover {
+  background: var(--panel-2);
+}
+
+.grid-row > span,
+.grid-row > .cell {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* The Key button isn't a plain `span`/`.cell` (the rule above), and as a grid item it defaults to `min-width:
+   auto`, so a long hex key (32 chars, monospace) would overflow its track into Source instead of truncating; the
+   full key still reaches the user via the button's `title`. */
+.ellipsis {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+
+.grid-row .key {
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.grid-row .source {
+  color: var(--text);
+}
+
+/* Key and Source stay in view while the culture columns scroll horizontally underneath them. */
+.sticky-col {
+  position: sticky;
+  z-index: 1;
+  background: var(--bg);
+}
+
+/* Above row sticky-col (z-index 1) so the header's own Key/Source corner stays on top of everything, including
+   rows scrolled up underneath the sticky header. */
+.grid-header .sticky-col {
+  z-index: 3;
+}
+
+/* Higher specificity than ".grid-row .key { background: none; }" above, so the sticky key button stays opaque. */
+.grid-row .key.sticky-col {
+  background: var(--bg);
+}
+
+/* Row hover must also recolour the sticky Key/Source cells, not just the (differently-stacked) culture cells
+   scrolling underneath them; specificity here beats both rules above regardless of source order. */
+.grid-row:hover .sticky-col,
+.grid-row:hover .key.sticky-col {
+  background: var(--panel-2);
+}
+
+.grid-row .key:hover,
+.grid-row .key:focus-visible {
+  color: var(--accent);
+  outline: none;
+  text-decoration: underline;
+}
+
+.cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-align: left;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  height: 28px;
+  padding: 0 4px;
+  overflow: hidden;
+}
+
+.cell-text {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Trailing status badge on a culture cell (src/grid/model.ts statusChip()); tone-* reuses cellTone()'s class names. */
+.status-chip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  font-size: 11px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
+.status-chip.tone-outdated {
+  background: rgba(170, 98, 227, 0.18);
+  color: var(--purple);
+}
+
+.status-chip.tone-done {
+  background: rgba(93, 162, 131, 0.18);
+  color: var(--green);
+}
+
+.status-chip.tone-bad,
+.status-chip.tone-band-R {
+  background: rgba(232, 56, 79, 0.18);
+  color: var(--red);
+}
+
+.status-chip.tone-band-Y {
+  background: rgba(241, 189, 108, 0.18);
+  color: var(--yellow);
+}
+
+.status-chip.tone-band-G {
+  background: rgba(93, 162, 131, 0.18);
+  color: var(--green);
+}
+
+.status-chip.tone-band-none {
+  background: rgba(160, 160, 160, 0.18);
+  color: var(--muted);
+}
+
+.cell-panel {
+  max-width: 980px;
+  display: grid;
+  gap: 12px;
+}
+
+.cell-panel section {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.cell-panel h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.cell-panel textarea {
+  width: 100%;
+}
+
+.cell-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.chip.band-R {
+  border-color: var(--band-r);
+  color: var(--band-r);
+}
+
+.chip.band-Y {
+  border-color: var(--band-y);
+  color: var(--band-y);
+}
+
+.chip.band-G {
+  border-color: var(--band-g);
+  color: var(--band-g);
+}
+
+.chip.outdated {
+  border-color: var(--outdated);
+  color: var(--outdated);
+}
+
+.actions,
+.forms form,
+.form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 6px 0;
+}
+
+.forms input:not([type='checkbox']) {
+  flex: 1;
+  min-width: 240px;
+}
+
+.context {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 4px 12px;
+  margin: 0;
+}
+
+.context dt {
+  color: var(--muted);
+}
+
+.context dd {
+  margin: 0;
+}
+
+.key-details {
+  position: fixed;
+  z-index: 20;
+  min-width: 280px;
+  max-width: 420px;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+
+.key-details dl {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 4px 12px;
+  margin: 0 0 10px;
+}
+
+.key-details dt {
+  color: var(--muted);
+}
+
+.key-details dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.key-details .key-value {
+  user-select: text;
+}
+
+.key-details .where-member .muted {
+  color: var(--muted);
+  margin-right: 4px;
+}
+
+.key-details .actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.issues,
+.judge {
+  color: var(--band-r);
+}
+
+/* Check tiers: issues Unreal accepts but that look wrong ("Approve anyway") — the same yellow box as .notice.warning,
+   body text in the normal colour so it stays readable on both themes. */
+.confirm-issues {
+  background: rgba(241, 189, 108, 0.1);
+  border: 1px solid var(--yellow);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 8px 0;
+}
+
+.confirm-issues p {
+  margin: 0;
+}
+
+.issues.confirm {
+  color: var(--text);
+  margin: 4px 0 0;
+}
+
+.queue-bar {
+  color: var(--muted);
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+/* Reads as a label above the table, the same way .context dt labels the dl next to it — not as a row. */
+.neighbors caption {
+  caption-side: top;
+  text-align: left;
+  color: var(--muted);
+  padding-bottom: 4px;
+}
+
+th {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+td {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+tbody tr:hover {
+  background: var(--panel-2);
+}
+
+.bands {
+  display: flex;
+  gap: 2px;
+  margin: 8px 0;
+  max-width: 720px;
+}
+
+.band-bar {
+  padding: 4px 8px;
+  color: #ffffff;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.band-bar.band-R {
+  background: var(--band-r);
+}
+
+.band-bar.band-Y {
+  background: var(--band-y);
+}
+
+.band-bar.band-G {
+  background: var(--band-g);
+}
+
+.tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.tabs button {
+  border-radius: 999px;
+}
+
+.tabs button[aria-pressed='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.inbox-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  max-width: 980px;
+}
+
+.inbox-list li {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
+.inbox-list textarea {
+  width: 100%;
+}
+
+.glossary textarea {
+  width: 100%;
+  max-width: 980px;
+}
+
+.import-preview {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin: 12px 0;
+  max-width: 640px;
+}
+
+.import-preview ul {
+  margin: 0 0 8px;
+  padding-left: 20px;
+}
+
+.import-preview .skipped {
+  margin-top: 8px;
+}

@@ -1,0 +1,8 @@
+Binaries/
+Intermediate/
+Saved/
+Service/node_modules/
+Service/dist/
+Web/node_modules/
+Web/dist/
+*.stackdump

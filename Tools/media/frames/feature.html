@@ -1,0 +1,74 @@
+<!doctype html>
+<!-- Fab gallery frame: 1920 x 1080. Feature title and a few short lines on the left, a real UI shot on the right.
+     Parameters come from the query string: ?title=...&body=line1|line2|line3&img=<file URL of the shot>.
+     Render with headless Edge at exactly 1920 x 1080. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LocHub feature frame</title>
+<style>
+  html, body { margin: 0; padding: 0; }
+  body {
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    box-sizing: border-box;
+    font-family: system-ui, 'Segoe UI', sans-serif;
+    color: #ffffff;
+    background: radial-gradient(circle at 18% 40%, #1c3a7a 0%, #12234a 42%, #0a1429 100%);
+    display: flex;
+    align-items: center;
+    gap: 50px;
+    padding: 0 40px 0 76px;
+  }
+  .copy { flex: 0 0 420px; display: flex; flex-direction: column; gap: 30px; }
+  h1 { margin: 0; font-size: 60px; font-weight: 600; line-height: 1.08; letter-spacing: -1px; text-wrap: balance; }
+  .body { display: flex; flex-direction: column; gap: 8px; }
+  .body p { margin: 0; font-size: 28px; line-height: 1.3; color: #c7d7ff; text-wrap: balance; }
+  .brand { display: flex; align-items: center; gap: 12px; margin-top: 26px; font-size: 24px; font-weight: 600; color: #8ea6dd; }
+  .brand svg { width: 34px; height: 34px; }
+  .shot {
+    flex: 1 1 auto;
+    min-width: 0;
+    border-radius: 18px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55);
+    background: #0f1a33;
+  }
+  .shot img { display: block; width: 100%; height: auto; }
+</style>
+</head>
+<body>
+  <div class="copy">
+    <h1 id="title"></h1>
+    <div class="body" id="body"></div>
+    <div class="brand">
+      <svg viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+        <path d="M 30 12 L 98 12 A 20 20 0 0 1 118 32 L 118 72 A 20 20 0 0 1 98 92
+                 L 46 92 L 18 116 L 30 92
+                 A 20 20 0 0 1 10 72 L 10 32 A 20 20 0 0 1 30 12 Z"
+              fill="#2F6FED" stroke="#1B4A8C" stroke-width="3" stroke-linejoin="round"/>
+        <circle cx="64" cy="54" r="34" fill="#FFFFFF" stroke="#2F6FED" stroke-width="3"/>
+        <ellipse cx="64" cy="54" rx="14" ry="34" fill="none" stroke="#2F6FED" stroke-width="2.5"/>
+        <line x1="30" y1="54" x2="98" y2="54" stroke="#2F6FED" stroke-width="3" stroke-linecap="round"/>
+        <circle cx="50" cy="42" r="4.5" fill="#FF8A3D"/>
+        <circle cx="80" cy="66" r="4.5" fill="#FF8A3D"/>
+      </svg>
+      LocHub
+    </div>
+  </div>
+  <div class="shot"><img id="shot" alt=""></div>
+<script>
+  const params = new URLSearchParams(location.search);
+  document.getElementById('title').textContent = params.get('title') ?? '';
+  const body = document.getElementById('body');
+  for (const line of (params.get('body') ?? '').split('|').filter(Boolean)) {
+    const p = document.createElement('p');
+    p.textContent = line;
+    body.appendChild(p);
+  }
+  document.getElementById('shot').src = params.get('img') ?? '';
+</script>
+</body>
+</html>

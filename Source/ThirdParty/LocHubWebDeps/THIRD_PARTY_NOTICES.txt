@@ -1,0 +1,7 @@
+Third-party software bundled in this folder (name version license file):
+
+@tanstack/react-virtual 3.14.13 MIT LICENSES/tanstack_react_virtual.txt
+@tanstack/virtual-core 3.17.11 MIT LICENSES/tanstack_virtual_core.txt
+react 19.3.0 MIT LICENSES/react.txt
+react-dom 19.3.0 MIT LICENSES/react_dom.txt
+scheduler 0.28.0 MIT LICENSES/scheduler.txt

@@ -1,0 +1,26 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0.0",
+	"FriendlyName": "LocHub",
+	"Description": "AI-assisted localization in the editor: translate your project's text with your own AI provider key, review it in one place and pull it back into the localization archives.",
+	"Category": "Localization",
+	"CreatedBy": "Dmitrii Vergasov",
+	"CreatedByURL": "https://github.com/DmVergasov/LocHub",
+	"DocsURL": "https://app.notion.com/p/LocHub-3e7fed51161881b6be04fb732972cb38",
+	"SupportURL": "mailto:rim2812@gmail.com",
+	"EngineVersion": "5.8.0",
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"EnabledByDefault": false,
+	"EditorOnly": true,
+	"Modules": [
+		{
+			"Name": "LocHubEditor",
+			"Type": "Editor",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [ "Win64", "Mac", "Linux" ]
+		}
+	]
+}

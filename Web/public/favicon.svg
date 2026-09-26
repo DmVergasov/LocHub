@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!--
+    LocHub mark: a speech bubble (localization / dialogue) containing a
+    globe (many languages / regions). Flat fills only, no gradients, no
+    third-party logos, no text glyphs.
+  -->
+
+  <!-- speech bubble: body and tail as one silhouette so the outline stroke
+       has no seam where the tail meets the rounded rect -->
+  <path d="M 30 12 L 98 12 A 20 20 0 0 1 118 32 L 118 72 A 20 20 0 0 1 98 92
+           L 46 92 L 18 116 L 30 92
+           A 20 20 0 0 1 10 72 L 10 32 A 20 20 0 0 1 30 12 Z"
+        fill="#2F6FED" stroke="#1B4A8C" stroke-width="3" stroke-linejoin="round"/>
+
+  <!-- globe -->
+  <circle cx="64" cy="54" r="34" fill="#FFFFFF" stroke="#2F6FED" stroke-width="3"/>
+  <ellipse cx="64" cy="54" rx="14" ry="34" fill="none" stroke="#2F6FED" stroke-width="2.5"/>
+  <line x1="30" y1="54" x2="98" y2="54" stroke="#2F6FED" stroke-width="3" stroke-linecap="round"/>
+  <line x1="40" y1="38" x2="88" y2="38" stroke="#2F6FED" stroke-width="2" stroke-linecap="round"/>
+  <line x1="40" y1="70" x2="88" y2="70" stroke="#2F6FED" stroke-width="2" stroke-linecap="round"/>
+
+  <!-- locale markers: distinct languages/regions on the globe -->
+  <circle cx="50" cy="42" r="4.5" fill="#FF8A3D"/>
+  <circle cx="80" cy="66" r="4.5" fill="#FF8A3D"/>
+</svg>
