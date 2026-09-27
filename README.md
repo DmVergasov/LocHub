@@ -23,6 +23,7 @@ Need a commercial license before the Fab listing is live? Email
 
 ![Grid overview](Docs/images/07_grid_overview.png)
 ![Cell panel](Docs/images/07_cell_panel.png)
+![Translated in context](Docs/images/07_context.png)
 ![Review queue](Docs/images/07_review_queue.png)
 ![Jobs](Docs/images/09_jobs.png)
 
