@@ -1,5 +1,6 @@
 // Fast deterministic checks used for the repair loop and the human gate. The engine re-validates on Pull and has the
 // final word (FTextFormat::ValidatePattern, Engine/Source/Runtime/Core/Public/Internationalization/Text.h:386).
+import { visibleLength } from './lengthCheck.js';
 import { countRichTextTags, parsePattern, richTextTagsBalanced, summarizeRichTags } from './ueText.js';
 
 // hard: Unreal rejects the text or prints it broken (ValidatePattern fails, a placeholder or modifier shows as raw
@@ -24,7 +25,13 @@ export interface PrecheckOptions {
   dntTerms: string[];
   // The engine's categories when the plugin sent them (LocHubStore.pluralCategoriesFor); absent means Node's.
   plurals?: PluralLookup;
+  // The Length Check limit of this unit in this culture (cells.ts precheckOptionsFor, lengthCheck.ts lengthLimitFor)
+  // and the severity an over-limit translation gets: soft (Warning) or confirm (Must Confirm). Absent: no limit.
+  length?: { limit: number; severity: 'soft' | 'confirm' };
 }
+
+// The Length Check issue; job.ts repairs it even when it is soft.
+export const TOO_LONG_CODE = 'too_long';
 
 export const PLURAL_CATEGORIES: ReadonlySet<string> = new Set(['zero', 'one', 'two', 'few', 'many', 'other']);
 
@@ -157,6 +164,17 @@ export function precheck(source: string, translation: string, culture: string, o
   const withoutDnt = opts.dntTerms.reduce((acc, t) => acc.split(t).join(''), source);
   if (translation.trim() === source.trim() && /\p{L}{3,}/u.test(withoutDnt))
     issues.push({ code: 'untranslated', severity: 'soft', message: 'Translation is identical to the source' });
+
+  // Not Unreal's rule but the project's: text over the limit is likely to overflow its widget.
+  if (opts.length) {
+    const length = visibleLength(translation);
+    if (length > opts.length.limit)
+      issues.push({
+        code: TOO_LONG_CODE,
+        severity: opts.length.severity,
+        message: `Too long for the UI: ${length}/${opts.length.limit} characters (Length Check in Project Settings)`,
+      });
+  }
 
   return issues;
 }

@@ -125,6 +125,19 @@ describe('GeminiLlmClient', () => {
     expect(outcome).toMatchObject({ kind: 'ok', text: '{"items":[]}' });
   });
 
+  // Amendment 8: Node's own fetch timeout is reported as the timeout it is (job.ts splits on it), naming Node's 300 s
+  // limit -- not as a bare "fetch failed" that job.ts would resend whole every round.
+  it('reports Node\'s fetch timeout as a timeout naming the limit that fired', async () => {
+    vi.useFakeTimers();
+    const fetchImpl = (async () => {
+      throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('Headers Timeout Error'), { code: 'UND_ERR_HEADERS_TIMEOUT' }) });
+    }) as typeof fetch;
+    const promise = new GeminiLlmClient({ fetchImpl, apiKey: 'k' }).runSync([request()], 1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const [outcome] = await promise;
+    expect(outcome).toEqual({ customId: 'r1', kind: 'error', message: 'Gemini: the request timed out after 5 minutes', retryable: true });
+  });
+
   it('has no batch mode and estimates input tokens locally', async () => {
     const client = new GeminiLlmClient({ fetchImpl: fakeFetch(200, {}).fetchImpl, apiKey: 'k' });
     await expect(client.runBatch([request()], 1000)).rejects.toThrow('Batch mode is only available for Anthropic with an API key.');

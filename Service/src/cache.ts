@@ -49,6 +49,9 @@ export interface ResolveOptions {
   onOutcome?: (outcome: LlmOutcome) => void;
   // Batch mode only: forwarded to LlmClient.runBatch's own polling-based progress.
   onBatchProgress?: (finishedRequests: number, totalRequests: number) => void;
+  // Sync mode only: forwarded to LlmClient.runSync (a declined request comes back 'skipped' and is never cached).
+  // A batch is submitted whole, so there is no request left to decline once it is running.
+  shouldContinue?: () => boolean;
 }
 
 export async function resolveWithCache(
@@ -88,10 +91,15 @@ export async function resolveWithCache(
   } else {
     // Sync mode: cache each answer as it arrives instead of waiting for the whole round, so a crash
     // mid-round does not lose answers that already came back; onOutcome rides along the same callback.
-    const results = await llm.runSync(toSend, opts.concurrency, (outcome) => {
-      cacheIfWorthKeeping(outcome);
-      opts.onOutcome?.(outcome);
-    });
+    const results = await llm.runSync(
+      toSend,
+      opts.concurrency,
+      (outcome) => {
+        cacheIfWorthKeeping(outcome);
+        opts.onOutcome?.(outcome);
+      },
+      opts.shouldContinue,
+    );
     for (const outcome of results) out.set(outcome.customId, outcome);
   }
   return out;

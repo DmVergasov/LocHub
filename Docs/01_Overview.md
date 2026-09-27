@@ -52,4 +52,4 @@ for exactly what is sent and where).
 | Fix a problem | [11_Troubleshooting_and_FAQ.md](11_Troubleshooting_and_FAQ.md) |
 | Find license and support information | [12_Support_and_License.md](12_Support_and_License.md) |
 
-![LocHub Grid tab open in the editor](images/01_overview_grid.png)
+![LocHub Grid tab open in the editor](images/01_grid_overview.png)

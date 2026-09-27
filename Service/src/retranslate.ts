@@ -32,7 +32,8 @@ export async function retranslateWithNote(
   const group = { groupKey: unit.groupKey, items: [{ unit, cell: { ...current, status: 'rejected' as const, note: text } }] };
   const params = translateParamsFor(store, cultureContext(store, culture, opts.brief), group, opts);
   const [outcome] = await llm.runSync([{ customId: requestId(params), params }], 1);
-  if (!outcome || outcome.kind === 'refusal' || outcome.kind === 'error') {
+  // No shouldContinue is passed, so a 'skipped' outcome cannot happen here; it would read as a failed call.
+  if (!outcome || outcome.kind !== 'ok') {
     // The reason reaches the reviewer instead of a bare "the model call failed", so a typo'd model id is
     // distinguishable from a billing problem; redacted, since it can echo a masked key fragment (a 401 text).
     const message =
@@ -42,7 +43,7 @@ export async function retranslateWithNote(
   const item = parseTranslatedItems(outcome.text, group).items.get(unitId);
   if (!item) throw new CellActionError('The model returned no translation for this string', 502);
 
-  const issues = checkTranslation(store, culture, unit, item.translation);
+  const issues = checkTranslation(store, culture, unit, item.translation, opts.lengthCheck);
   // Re-read after the model call: a human edit or a job may have written this cell meanwhile, and only the
   // suggestion belongs to this request.
   // The model call can take seconds; re-check before staging the event so a 409 leaves no phantom `after`.

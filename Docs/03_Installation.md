@@ -8,7 +8,7 @@
    **LocHub** under the Localization category, and enable it.
 3. Restart the editor when prompted.
 
-![Edit > Plugins with LocHub found and enabled](images/03_enable_plugin.png)
+![Edit > Plugins with LocHub found and enabled](images/02_enable_plugin.png)
 
 > **Note:** LocHub from Fab comes prebuilt for Windows, macOS and Linux, so enabling it needs no compile
 > step. Only Windows is tested by the author — see [02_Requirements.md](02_Requirements.md).
@@ -39,7 +39,7 @@ it looked, with a **Download Node.js** link and an **Open Settings** button that
 **Node.js Executable** setting; the tab or the notification that triggered the check shows the error too.
 The window opens once per failed launch attempt — it does not stack a second copy while one is already open.
 
-![The Node.js required window](images/03_node_missing_dialog.png)
+![The Node.js required window](images/03_node_missing.png)
 
 > **Tip:** after installing Node.js, just launch LocHub again (for example press **Reload** in the tab). If
 > it is still not found, restart the editor so it picks up the updated PATH.

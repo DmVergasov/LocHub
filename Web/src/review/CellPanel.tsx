@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, type FormEvent, type Ref } from 'react';
 import { emptyCell } from '../../../Service/src/contract';
+import { visibleLength } from '../../../Service/src/lengthCheck';
 import { ApiError, type LocHubApi } from '../api/client';
 import type { Cell, CellEvent, PrecheckIssue, Unit } from '../api/types';
 import type { EditorBridge } from '../bridge';
@@ -40,6 +41,8 @@ const FIX_PROBLEMS_TITLE = 'Fix the problems above first';
 // "Save anyway", the A hotkey never overrides it, and the click names the codes it shows in `accept`.
 const CONFIRM_LINE = 'Unreal accepts this text, but it looks wrong. Approve anyway if it is intended.';
 const CHECK_WARNINGS_NOTICE = 'Check the warnings, then click Approve anyway.';
+
+const LENGTH_COUNTER_TITLE = 'Visible characters / Length Check limit';
 
 // One history line; an approve or edit a human confirmed despite warnings names them, e.g.
 // "approved anyway (args_missing)".
@@ -86,6 +89,10 @@ export function CellPanel({ api, bridge, row, culture, editorConnected, neighbor
   const route = bridge.route(editorConnected);
   const origin = parseOrigin(unit.origin);
   const args = formatArgs(unit.source);
+  // Length Check counter: the draft's visible characters against the limit GET /api/cells sent for this string (null or
+  // absent: no limit, no counter), counted exactly like the service's too_long check.
+  const lengthLimit = gridCell?.lengthLimit ?? null;
+  const draftLength = visibleLength(draft);
 
   const loadHistory = useCallback(() => {
     api.history(culture, unit.id).then(setHistory, (e: unknown) => setError(errorText(e)));
@@ -262,10 +269,19 @@ export function CellPanel({ api, bridge, row, culture, editorConnected, neighbor
       <section>
         <h3>Translation ({culture})</h3>
         <textarea ref={editRef} aria-label="Translation" rows={3} value={draft} onChange={(e) => setDraft(e.target.value)} />
+        {lengthLimit !== null && (
+          <p className={draftLength > lengthLimit ? 'length-counter over' : 'length-counter'} title={LENGTH_COUNTER_TITLE}>
+            {`${draftLength}/${lengthLimit}`}
+          </p>
+        )}
         {listedIssues.length > 0 && (
           <ul className="issues">
             {listedIssues.map((issue, index) => (
-              <li key={index}>{issue.message}</li>
+              // A soft issue (e.g. a Warning-level too_long, or "Translation is identical to the source") is a
+              // hint that blocks nothing; only a hard issue is the blocking-error red the list defaults to (M-2).
+              <li key={index} className={issue.severity === 'soft' ? 'soft' : undefined}>
+                {issue.message}
+              </li>
             ))}
           </ul>
         )}

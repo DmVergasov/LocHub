@@ -243,6 +243,16 @@ code {
   background: var(--yellow);
 }
 
+/* A Custom endpoint LocHub cannot reach: the one AI pill state that is an error, not a warning. */
+.ai-status.endpoint-error {
+  color: var(--red);
+  font-weight: 600;
+}
+
+.ai-status.endpoint-error::before {
+  background: var(--red);
+}
+
 /* Full-height flex column: only the grid's own .grid-scroll scrolls (see below); the document itself never does.
    Other views (Queue, Jobs, ...) are plain block content here, so `overflow: auto` lets them scroll inside main
    instead of growing the page when they are taller than the viewport. */
@@ -894,6 +904,11 @@ main h3 {
   color: var(--band-r);
 }
 
+/* A soft issue blocks nothing (M-2): the same yellow as .notice.warning, not the list's default blocking red. */
+.issues li.soft {
+  color: var(--yellow);
+}
+
 /* Check tiers: issues Unreal accepts but that look wrong ("Approve anyway") — the same yellow box as .notice.warning,
    body text in the normal colour so it stays readable on both themes. */
 .confirm-issues {
@@ -911,6 +926,25 @@ main h3 {
 .issues.confirm {
   color: var(--text);
   margin: 4px 0 0;
+}
+
+/* Length Check: the draft's visible characters against the string's limit, under the edit box; once the draft is over,
+   the same yellow as the "Approve anyway" box, body text in the normal colour so it stays readable on both themes. */
+.length-counter {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.length-counter.over {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid var(--yellow);
+  border-radius: 6px;
+  background: rgba(241, 189, 108, 0.18);
+  color: var(--text);
+  font-weight: 600;
 }
 
 .queue-bar {
@@ -1034,4 +1068,22 @@ tbody tr:hover {
 
 .import-preview .skipped {
   margin-top: 8px;
+}
+
+/* Translation exchange (Grid toolbar Export…/Import…): the panel takes a toolbar line of its own. */
+.toolbar .exchange-panel {
+  flex-basis: 100%;
+  max-width: 980px;
+  max-height: 60vh;
+  overflow: auto;
+  margin: 4px 0;
+}
+
+.exchange-panel label {
+  display: block;
+  margin: 6px 0;
+}
+
+.exchange-panel details {
+  margin: 4px 0;
 }

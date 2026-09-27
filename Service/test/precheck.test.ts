@@ -197,3 +197,31 @@ describe('precheck: plural categories from the engine', () => {
     expect(codesIn('de', src, '{Count}|plural(one=Ballen,few=Ballen,other=Ballen) übrig')).toEqual(['plural_form_unused']);
   });
 });
+
+describe('precheck: too_long (Length Check)', () => {
+  const MESSAGE_21_OF_10 = 'Too long for the UI: 21/10 characters (Length Check in Project Settings)';
+
+  it('flags a translation over the limit with the configured severity', () => {
+    expect(precheck('Save', 'Speichern jetzt bitte', 'de', { dntTerms: [], length: { limit: 10, severity: 'soft' } })).toEqual([
+      { code: 'too_long', severity: 'soft', message: MESSAGE_21_OF_10 },
+    ]);
+    const confirm = precheck('Save', 'Speichern jetzt bitte', 'de', { dntTerms: [], length: { limit: 10, severity: 'confirm' } });
+    expect(confirm).toEqual([{ code: 'too_long', severity: 'confirm', message: MESSAGE_21_OF_10 }]);
+    expect(blocksAutoAccept(confirm)).toBe(true);
+  });
+
+  it('passes a translation exactly at the limit and flags one character more', () => {
+    const at = (translation: string) => precheck('Save', translation, 'de', { dntTerms: [], length: { limit: 10, severity: 'soft' } });
+    expect(at('Speichern!')).toEqual([]);
+    expect(at('Speichern!!').map((i) => i.code)).toEqual(['too_long']);
+  });
+
+  it('measures visible characters: arguments and tags count 0', () => {
+    const issues = precheck('<Bold>{Count}</> left', '<Bold>{Count}</> übrig', 'de', { dntTerms: [], length: { limit: 6, severity: 'soft' } });
+    expect(issues).toEqual([]);
+  });
+
+  it('never flags length without a limit', () => {
+    expect(precheck('Save', 'Speichern jetzt bitte', 'de', { dntTerms: [] })).toEqual([]);
+  });
+});

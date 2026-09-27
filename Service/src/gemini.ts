@@ -1,6 +1,19 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { LlmClient, LlmOutcome, LlmRequest } from './llm.js';
-import { approxInputTokens, BATCH_UNAVAILABLE_MESSAGE, fetchWithRetry, MISSING_KEY_MESSAGE, REQUEST_TIMEOUT_MS, runPool, schemaOf, systemTextOf, userTextOf } from './llmShared.js';
+import {
+  approxInputTokens,
+  BATCH_UNAVAILABLE_MESSAGE,
+  fetchWithRetry,
+  isFetchTimeout,
+  MISSING_KEY_MESSAGE,
+  REQUEST_TIMEOUT_MS,
+  runPool,
+  schemaOf,
+  systemTextOf,
+  timedOutAfterMs,
+  timeoutMessage,
+  userTextOf,
+} from './llmShared.js';
 
 const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 const REFUSAL_REASONS: ReadonlySet<string> = new Set(['SAFETY', 'PROHIBITED_CONTENT', 'BLOCKLIST', 'SPII', 'RECITATION']);
@@ -61,8 +74,13 @@ export class GeminiLlmClient implements LlmClient {
     this.apiKey = options.apiKey;
   }
 
-  async runSync(requests: LlmRequest[], concurrency: number, onOutcome?: (outcome: LlmOutcome) => void): Promise<LlmOutcome[]> {
-    return runPool(requests, concurrency, (request) => this.runOne(request), onOutcome);
+  async runSync(
+    requests: LlmRequest[],
+    concurrency: number,
+    onOutcome?: (outcome: LlmOutcome) => void,
+    shouldContinue?: () => boolean,
+  ): Promise<LlmOutcome[]> {
+    return runPool(requests, concurrency, (request) => this.runOne(request), onOutcome, shouldContinue);
   }
 
   async runBatch(_requests: LlmRequest[], _pollMs: number): Promise<LlmOutcome[]> {
@@ -87,8 +105,13 @@ export class GeminiLlmClient implements LlmClient {
     );
     if ('networkError' in result) {
       const { networkError } = result;
-      const timedOut = networkError instanceof Error && (networkError.name === 'TimeoutError' || networkError.name === 'AbortError');
-      const message = timedOut ? 'the request timed out after 10 minutes' : networkError instanceof Error ? networkError.message : String(networkError);
+      // Node's own fetch timeout counts as a timeout too (amendment 8); job.ts splits the group on either.
+      const timedOut = isFetchTimeout(networkError);
+      const message = timedOut
+        ? timeoutMessage(timedOutAfterMs(networkError, REQUEST_TIMEOUT_MS))
+        : networkError instanceof Error
+          ? networkError.message
+          : String(networkError);
       return { customId: request.customId, kind: 'error', message: `Gemini: ${message}`, retryable: true };
     }
     return outcomeFromGenerateResponse(request.customId, result.status, result.json as GeminiResponse);

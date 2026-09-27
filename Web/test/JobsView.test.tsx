@@ -730,4 +730,29 @@ describe('JobsView', () => {
       expect(screen.getByText('The model x does not exist')).toBeTruthy();
     });
   });
+
+  describe('JobsView estimate on a Custom endpoint', () => {
+    it('says no price is set and that Max USD cannot limit spending, with no Max USD field and Run enabled', async () => {
+      const user = userEvent.setup();
+      const fake = createFakeApi({ units: [makeUnit('A', 'PAUSED'), makeUnit('B', 'BACK')], estimateUsd: 0, estimatePricesUnset: true });
+      render(<JobsView api={new LocHubApi('', fake.fetch)} culture="ru" billing="api" onJobDone={vi.fn()} pollMs={5} />);
+
+      await user.click(screen.getByRole('button', { name: 'Estimate' }));
+      expect(await screen.findByText('Custom endpoint prices are 0 in Project Settings; Max USD cannot limit spending.')).toBeTruthy();
+      expect(screen.getByText(/no price set/)).toBeTruthy();
+      expect(screen.queryByText(/price unknown for this model/)).toBeFalsy();
+      expect(screen.queryByLabelText('Max USD')).toBeFalsy();
+      expect((screen.getByRole('button', { name: 'Run' }) as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    it('keeps "price unknown for this model" and shows no hint for an unpriced built-in model', async () => {
+      const user = userEvent.setup();
+      const fake = createFakeApi({ units: [makeUnit('A', 'PAUSED')], estimateUsd: null });
+      render(<JobsView api={new LocHubApi('', fake.fetch)} culture="ru" billing="api" onJobDone={vi.fn()} pollMs={5} />);
+
+      await user.click(screen.getByRole('button', { name: 'Estimate' }));
+      expect(await screen.findByText(/price unknown for this model/)).toBeTruthy();
+      expect(screen.queryByText(/Max USD cannot limit spending/)).toBeFalsy();
+    });
+  });
 });

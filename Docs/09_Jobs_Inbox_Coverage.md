@@ -23,8 +23,10 @@ hover the button for why). Once it returns, one of these appears:
 - **Fully covered by reuse**: "N strings reuse translation memory or cached answers — no translate cost is
   estimated; judging may still run." plus a **Run** button — no Max USD needed, since no model call for
   translation happens either way.
-- **No dollar figure to show** (a model with no known price): "≈ N strings in M requests · ≈ X input / Y output
-  tokens" plus "price unknown for this model", and a **Run** button with no Max USD field.
+- **No dollar figure to show** (a model with no known price, or a Custom endpoint whose prices are both 0): "≈ N
+  strings in M requests · ≈ X input / Y output tokens" plus "price unknown for this model" — for such a Custom
+  endpoint "no price set" and the line "Custom endpoint prices are 0 in Project Settings; Max USD cannot limit
+  spending." instead — and a **Run** button with no Max USD field.
 - **Normal, priced estimate**: "N strings in M requests · X input / Y output tokens · estimated \$Z" plus a
   **Max USD** field (pre-filled about 20% above the estimate) and **Run**, disabled until Max USD covers the
   estimate.
@@ -77,6 +79,14 @@ Once a job ends, the report line reads:
 - **Errors** — a provider/network failure for that string, after retries.
 - **Questions** — new Inbox questions raised by the model's own ambiguity about a string.
 
+**Length Check in jobs**: with **Tell the Translator** on (Project Settings > Plugins > LocHub > Length Check),
+every string that has a length limit goes to the AI together with that limit, and the AI is asked to stay within it —
+counting visible characters, with placeholders and tags as 0 and Chinese, Japanese and Korean characters as 2 — and to
+prefer a natural shorter wording over abbreviations. A draft that comes back too long anyway is sent back for a shorter
+wording: once per job under **Warning**, and in every repair round like any other warning under **Must Confirm**.
+What is still too long after that stays an AI draft in band Y (**Warning**) or is written **Needs fix** (**Must
+Confirm**), which the next job picks up and translates again.
+
 **Error reasons**: when a job reports errors (or a judge failure), up to three distinct, redacted error messages
 appear underneath the report line — enough to act on (a wrong model id, an invalid key, no credit) without an
 unexplained error count. A judge failure is listed the same way, prefixed `Judge:`, but is never counted in
@@ -87,7 +97,7 @@ a grid of unexplained needs-fix cells — nothing already reused from translatio
 If the service restarts mid-poll, the panel shows "Job status unknown — the service may have restarted." — job
 records live only in memory and do not survive a restart.
 
-![Jobs](images/09_jobs.png)
+![Jobs](images/05_jobs.png)
 
 ## Inbox
 
@@ -125,7 +135,7 @@ The proposals file spells out the manual fix for a C++ string (replace `LOCTEXT(
 `NOTELOCTEXT(Key, Text, Notes)`, and `NSLOCTEXT` with `NSNOTELOCTEXT`) — after applying it, re-run Gather Text and
 Pull again; the question is considered closed once the manifest carries the note.
 
-![Inbox](images/09_inbox.png)
+![Inbox](images/19_inbox.png)
 
 ## Coverage
 
@@ -147,4 +157,4 @@ exclude patterns (by default: editor-only source, `Tests`, `ThirdParty`, and gen
 > **Tip:** For a visual pass, launch the game with `-LEETIFYUnlocalized`: every string that has no translation is
 > rendered in leetspeak, making any hard-coded (never-translatable) text stand out immediately on screen.
 
-![Coverage](images/09_coverage.png)
+![Coverage](images/20_coverage.png)

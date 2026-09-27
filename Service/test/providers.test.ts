@@ -5,8 +5,9 @@ import { GeminiLlmClient } from '../src/gemini.js';
 import { DEFAULT_JOB_OPTIONS } from '../src/job.js';
 import { AnthropicLlmClient } from '../src/llm.js';
 import { MISSING_KEY_MESSAGE } from '../src/llmShared.js';
-import { OPENAI_COMPATIBLE_PROFILES, OpenAiCompatibleLlmClient, type OpenAiCompatibleProfile } from '../src/openaiCompatible.js';
-import { apiKeyHealth, billingOf, createLlmClient, jobDefaultsFor, keyIdOf, supportsBatch, type AiConfig } from '../src/providers.js';
+import type { CustomEndpointConfig } from '../src/customEndpoint.js';
+import { customProfileOf, OPENAI_COMPATIBLE_PROFILES, OpenAiCompatibleLlmClient, type OpenAiCompatibleProfile } from '../src/openaiCompatible.js';
+import { apiKeyHealth, billingOf, createLlmClient, jobDefaultsFor, keyIdOf, NO_KEY_NEEDED_DETAIL, supportsBatch, type AiConfig } from '../src/providers.js';
 
 const config = (patch: Partial<AiConfig>): AiConfig => ({ provider: 'anthropic', auth: 'api', translateModel: 't', judgeModel: 'j', ...patch });
 
@@ -110,6 +111,59 @@ describe('providers', () => {
       expect(defaults.maxRepairRounds).toBe(DEFAULT_JOB_OPTIONS.maxRepairRounds);
       expect(defaults.auditPercent).toBe(DEFAULT_JOB_OPTIONS.auditPercent);
       expect(defaults.actor).toBe(DEFAULT_JOB_OPTIONS.actor);
+    });
+  });
+
+  describe('Custom (OpenAI-compatible) endpoint', () => {
+    const custom: CustomEndpointConfig = {
+      baseUrl: 'http://127.0.0.1:11434/v1',
+      keyHeader: 'api-key',
+      structuredOutput: 'prompt_only',
+      priceIn: 0,
+      priceOut: 0,
+      maxParallel: 2,
+      requestTimeoutSeconds: 90,
+      settingsId: 'test-settings-id',
+    };
+
+    it('creates an OpenAI-compatible client whose profile is built from the endpoint settings', () => {
+      const client = createLlmClient(config({ provider: 'custom', custom }), 'D:/P', undefined);
+      expect(client).toBeInstanceOf(OpenAiCompatibleLlmClient);
+      expect((client as unknown as { profile: OpenAiCompatibleProfile }).profile).toEqual(customProfileOf(custom));
+    });
+
+    it('reports a custom endpoint without a key as ready ("not required"), every other provider as not ready', () => {
+      expect(apiKeyHealth({}, 'custom')).toEqual({ ready: true, detail: NO_KEY_NEEDED_DETAIL });
+      expect(apiKeyHealth({ LOCHUB_API_KEY: 'test-key-not-real' }, 'custom')).toEqual({ ready: true, detail: 'API key is set' });
+      expect(apiKeyHealth({}, 'openai')).toEqual({ ready: false, detail: MISSING_KEY_MESSAGE });
+    });
+
+    // M-3/amendment 4: the real cap on concurrent requests is now the semaphore inside OpenAiCompatibleLlmClient
+    // (shared across every job); this concurrency is just this one job's own worker count, so every configured
+    // value takes effect, including one above the built-in default of 8 (the pre-fix bug: values 9-32 did nothing).
+    it("sets job concurrency to the endpoint's Max Parallel Requests exactly, for every value 1-32", () => {
+      expect(jobDefaultsFor(config({ provider: 'custom', custom })).concurrency).toBe(2);
+      expect(jobDefaultsFor(config({ provider: 'custom', custom: { ...custom, maxParallel: 32 } })).concurrency).toBe(32);
+      expect(jobDefaultsFor(config({ provider: 'custom', custom: { ...custom, maxParallel: 1 } })).concurrency).toBe(1);
+      expect(jobDefaultsFor(config({ provider: 'openai' })).concurrency).toBe(DEFAULT_JOB_OPTIONS.concurrency);
+    });
+  });
+
+  describe('Custom endpoint job prices', () => {
+    const custom: CustomEndpointConfig = {
+      baseUrl: 'http://127.0.0.1:11434/v1',
+      keyHeader: 'bearer',
+      structuredOutput: 'json_schema',
+      priceIn: 0.15,
+      priceOut: 0.6,
+      maxParallel: 2,
+      requestTimeoutSeconds: 600,
+      settingsId: 'test-settings-id',
+    };
+
+    it('passes the Project Settings prices to jobs on a custom endpoint, and none for built-in providers', () => {
+      expect(jobDefaultsFor(config({ provider: 'custom', custom })).customPrice).toEqual({ input: 0.15, output: 0.6 });
+      expect(jobDefaultsFor(config({ provider: 'openai' }))).not.toHaveProperty('customPrice');
     });
   });
 });

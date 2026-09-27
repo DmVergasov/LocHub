@@ -44,6 +44,20 @@ struct FLocHubHealth
 	/** True when the "ai" object had a "keyId" field at all; false for an "ai" object from a build that predates
 	 *  this field, the one case IsAiConfigApplied treats as "nothing to compare". */
 	bool bHasAiKeyId = false;
+	/** Wire value of ai.lengthArgs: the Length Check flags the service runs with, in the exact form
+	 *  FLocHubServiceProcess::BuildLengthArguments writes them ("--length-check off" when it got none). Only meaningful
+	 *  when bHasAiLengthArgs is true. */
+	FString AiLengthArgs;
+	/** True when the "ai" object had a "lengthArgs" field; false for a service build that predates the Length Check, which
+	 *  IsAiConfigApplied treats as "nothing to compare". */
+	bool bHasAiLengthArgs = false;
+	/** Wire value of ai.customSettingsId (Custom endpoints only): the service's hash of its Custom endpoint flags,
+	 *  compared against FLocHubServiceProcess::FConfig::CustomSettingsId. Only meaningful when bHasAiCustomSettingsId. */
+	FString AiCustomSettingsId;
+	/** True when the "ai" object had a "customSettingsId" field: a Custom endpoint on a service that knows the field. */
+	bool bHasAiCustomSettingsId = false;
+	/** Wire value of ai.endpoint.url (Custom endpoints only): the base URL as scheme://host[:port]; empty when absent. */
+	FString AiEndpointUrl;
 	/** True while a translation job has status "running" (optional top-level "jobRunning"); false when absent. */
 	bool bJobRunning = false;
 };

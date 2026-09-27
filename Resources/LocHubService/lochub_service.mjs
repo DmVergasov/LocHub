@@ -2,7 +2,7 @@
 // Copyright Dmitrii Vergasov, 2026. All Rights Reserved.
 
 // src/cli.ts
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash8 } from "node:crypto";
 import { existsSync as existsSync5, readFileSync as readFileSync5 } from "node:fs";
 import { join as join7, resolve as resolve3 } from "node:path";
 import { parseArgs } from "node:util";
@@ -95,10 +95,15 @@ async function resolveWithCache(llm, cache, requests, opts) {
       opts.onOutcome?.(outcome);
     }
   } else {
-    const results = await llm.runSync(toSend, opts.concurrency, (outcome) => {
-      cacheIfWorthKeeping(outcome);
-      opts.onOutcome?.(outcome);
-    });
+    const results = await llm.runSync(
+      toSend,
+      opts.concurrency,
+      (outcome) => {
+        cacheIfWorthKeeping(outcome);
+        opts.onOutcome?.(outcome);
+      },
+      opts.shouldContinue
+    );
     for (const outcome of results) out.set(outcome.customId, outcome);
   }
   return out;
@@ -110,6 +115,377 @@ function isJsonObject(text) {
   } catch {
     return false;
   }
+}
+
+// src/customEndpoint.ts
+import { createHash } from "node:crypto";
+
+// src/llmShared.ts
+var REQUEST_TIMEOUT_MS = 10 * 60 * 1e3;
+var NODE_FETCH_TIMEOUT_MS = 3e5;
+var NODE_FETCH_TIMEOUT_CODES = /* @__PURE__ */ new Set(["UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"]);
+function nodeFetchTimeoutCode(error) {
+  const own = error?.code;
+  if (typeof own === "string" && NODE_FETCH_TIMEOUT_CODES.has(own)) return own;
+  const cause = error?.cause?.code;
+  return typeof cause === "string" && NODE_FETCH_TIMEOUT_CODES.has(cause) ? cause : void 0;
+}
+function isFetchTimeout(error) {
+  if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) return true;
+  return nodeFetchTimeoutCode(error) !== void 0;
+}
+function timedOutAfterMs(error, configuredMs) {
+  return nodeFetchTimeoutCode(error) !== void 0 ? Math.min(configuredMs, NODE_FETCH_TIMEOUT_MS) : configuredMs;
+}
+function describeDuration(ms) {
+  const seconds = Math.round(ms / 1e3);
+  if (seconds % 60 !== 0) return `${seconds} seconds`;
+  const minutes = seconds / 60;
+  return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+}
+var TIMEOUT_MARK = "the request timed out after";
+function timeoutMessage(ms) {
+  return `${TIMEOUT_MARK} ${describeDuration(ms)}`;
+}
+function isTimeoutMessage(message) {
+  return message.includes(TIMEOUT_MARK);
+}
+var BATCH_UNAVAILABLE_MESSAGE = "Batch mode is only available for Anthropic with an API key.";
+var MISSING_KEY_MESSAGE = "No API key: enter it in Project Settings > Plugins > LocHub > AI > API Key.";
+function systemTextOf(params) {
+  const { system } = params;
+  if (!system) return "";
+  if (typeof system === "string") return system;
+  return system.filter((block) => block.type === "text").map((block) => block.text).join("\n\n");
+}
+function userTextOf(params) {
+  const first = params.messages[0];
+  if (!first) return "";
+  return typeof first.content === "string" ? first.content : JSON.stringify(first.content);
+}
+function schemaOf(params) {
+  return params.output_config?.format?.schema ?? {};
+}
+function effortOf(params) {
+  const effort = params.output_config?.effort;
+  return typeof effort === "string" ? effort : void 0;
+}
+function approxInputTokens(params) {
+  return Math.ceil((systemTextOf(params).length + userTextOf(params).length) / 3);
+}
+function approxOutputTokens(text) {
+  return Math.ceil(text.length / 3);
+}
+var KEY_ENV_VAR = "LOCHUB_API_KEY";
+var SECRET_SHAPED_PATTERNS = [
+  /(?<![A-Za-z0-9])sk-[A-Za-z0-9_*-]{6,}/g,
+  /(?<![A-Za-z0-9])xai-[A-Za-z0-9_*-]{6,}/g,
+  /AIza[0-9A-Za-z_-]{10,}/g,
+  /Bearer\s+\S+/g
+];
+function redactSecrets(text) {
+  let out = text;
+  const value = process.env[KEY_ENV_VAR];
+  if (value) out = out.split(value).join("[redacted]");
+  for (const pattern of SECRET_SHAPED_PATTERNS) out = out.replace(pattern, "[redacted]");
+  return out;
+}
+var FETCH_RETRY_MAX_RETRIES = 2;
+var RETRY_AFTER_CAP_MS = 6e4;
+var BACKOFF_BASE_MS = 500;
+var BACKOFF_CAP_MS = 8e3;
+var BACKOFF_JITTER_RATIO = 0.25;
+var TRANSIENT_STATUSES = /* @__PURE__ */ new Set([408, 409, 429]);
+function isTransientStatus(status) {
+  return TRANSIENT_STATUSES.has(status) || status >= 500;
+}
+function sleep(ms) {
+  return new Promise((resolve4) => setTimeout(resolve4, ms));
+}
+function jitteredBackoffMs(attempt) {
+  const base = Math.min(BACKOFF_BASE_MS * 2 ** attempt, BACKOFF_CAP_MS);
+  const jitter = base * BACKOFF_JITTER_RATIO;
+  return Math.min(Math.max(base - jitter + Math.random() * (2 * jitter), 0), BACKOFF_CAP_MS);
+}
+function retryAfterMsFrom(headers) {
+  const ms = headers.get("retry-after-ms");
+  if (ms !== null) {
+    const parsed = Number(ms);
+    if (Number.isFinite(parsed) && parsed >= 0) return Math.min(parsed, RETRY_AFTER_CAP_MS);
+  }
+  const after = headers.get("retry-after");
+  if (after === null) return void 0;
+  const seconds = Number(after);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1e3, RETRY_AFTER_CAP_MS);
+  const at = Date.parse(after);
+  if (Number.isNaN(at)) return void 0;
+  return Math.min(Math.max(at - Date.now(), 0), RETRY_AFTER_CAP_MS);
+}
+async function fetchWithRetry(url, buildInit, opts) {
+  for (let attempt = 0; ; attempt++) {
+    let response;
+    let text;
+    try {
+      response = await opts.fetchImpl(url, buildInit());
+      text = await response.text().catch((bodyError) => {
+        if (isFetchTimeout(bodyError)) throw bodyError;
+        return "";
+      });
+    } catch (networkError) {
+      const timedOut = isFetchTimeout(networkError);
+      const final = opts.isFinalNetworkError?.(networkError) ?? false;
+      if (final || timedOut && opts.retryTimeouts === false || attempt >= FETCH_RETRY_MAX_RETRIES) return { networkError };
+      await sleep(jitteredBackoffMs(attempt));
+      continue;
+    }
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = {};
+    }
+    const isFinal = opts.isFinal?.(response.status, json) ?? false;
+    if (isFinal || !isTransientStatus(response.status) || attempt >= FETCH_RETRY_MAX_RETRIES) return { status: response.status, text, json };
+    await sleep(retryAfterMsFrom(response.headers) ?? jitteredBackoffMs(attempt));
+  }
+}
+async function runPool(requests, concurrency, runOne, onOutcome, shouldContinue) {
+  const out = new Array(requests.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < requests.length) {
+      const index = next++;
+      if (shouldContinue && !shouldContinue()) {
+        out[index] = { customId: requests[index].customId, kind: "skipped" };
+        continue;
+      }
+      const outcome = await runOne(requests[index]);
+      out[index] = outcome;
+      onOutcome?.(outcome);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, requests.length)) }, worker));
+  return out;
+}
+
+// src/customEndpoint.ts
+var CUSTOM_KEY_HEADERS = ["bearer", "api-key"];
+var STRUCTURED_OUTPUT_MODES = ["json_schema", "json_object", "prompt_only"];
+var CUSTOM_FLAGS = ["base-url", "key-header", "structured-output", "price-in", "price-out", "max-parallel", "request-timeout"];
+var CUSTOM_FLAG_DEFAULTS = {
+  "key-header": "bearer",
+  "structured-output": "json_schema",
+  "price-in": "0",
+  "price-out": "0",
+  "max-parallel": "2",
+  "request-timeout": "300"
+};
+var REQUEST_TIMEOUT_MIN_SECONDS = 30;
+var REQUEST_TIMEOUT_MAX_SECONDS = 300;
+function customSettingsIdOf(rawValues) {
+  return createHash("sha1").update(rawValues.join("\n"), "utf8").digest("hex").slice(0, 12);
+}
+function parsePrice(text) {
+  const value = Number(text);
+  return text.trim() !== "" && Number.isFinite(value) && value >= 0 ? value : void 0;
+}
+function parseIntInRange(text, min, max) {
+  const value = Number(text);
+  return /^\d+$/.test(text) && value >= min && value <= max ? value : void 0;
+}
+function parseCustomEndpointFlags(values, envBaseUrl) {
+  const raw = (flag) => values[flag] ?? CUSTOM_FLAG_DEFAULTS[flag];
+  const flagBaseUrl = values["base-url"];
+  const usingEnv = flagBaseUrl === void 0 && envBaseUrl !== void 0 && envBaseUrl !== "";
+  const baseUrlRaw = flagBaseUrl ?? envBaseUrl ?? "";
+  const baseUrlLabel = usingEnv ? "Custom Base URL" : "--base-url";
+  if (baseUrlRaw === "") return { error: "Custom Base URL is required: pass --base-url or set LOCHUB_CUSTOM_BASE_URL" };
+  let parsed;
+  try {
+    parsed = new URL(baseUrlRaw);
+  } catch {
+    parsed = void 0;
+  }
+  if (!parsed || parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return { error: `Invalid ${baseUrlLabel}: it must start with http:// or https://` };
+  }
+  if (parsed.username !== "" || parsed.password !== "") {
+    return { error: `Invalid ${baseUrlLabel}: a user name or password in the URL is not supported; set the key in Project Settings > Plugins > LocHub > AI > API Key` };
+  }
+  const keyHeader = raw("key-header");
+  if (!CUSTOM_KEY_HEADERS.includes(keyHeader)) return { error: `Invalid --key-header ${keyHeader}` };
+  const structuredOutput = raw("structured-output");
+  if (!STRUCTURED_OUTPUT_MODES.includes(structuredOutput)) return { error: `Invalid --structured-output ${structuredOutput}` };
+  const priceIn = parsePrice(raw("price-in"));
+  if (priceIn === void 0) return { error: `Invalid --price-in ${raw("price-in")}` };
+  const priceOut = parsePrice(raw("price-out"));
+  if (priceOut === void 0) return { error: `Invalid --price-out ${raw("price-out")}` };
+  const maxParallel = parseIntInRange(raw("max-parallel"), 1, 32);
+  if (maxParallel === void 0) return { error: `Invalid --max-parallel ${raw("max-parallel")}` };
+  const requestTimeoutSeconds = parseIntInRange(raw("request-timeout"), REQUEST_TIMEOUT_MIN_SECONDS, REQUEST_TIMEOUT_MAX_SECONDS);
+  if (requestTimeoutSeconds === void 0) return { error: `Invalid --request-timeout ${raw("request-timeout")}` };
+  return {
+    baseUrl: baseUrlRaw.endsWith("/") ? baseUrlRaw.slice(0, -1) : baseUrlRaw,
+    keyHeader,
+    structuredOutput,
+    priceIn,
+    priceOut,
+    maxParallel,
+    requestTimeoutSeconds,
+    settingsId: customSettingsIdOf([baseUrlRaw, keyHeader, structuredOutput, raw("price-in"), raw("price-out"), raw("max-parallel"), raw("request-timeout")])
+  };
+}
+function reduceBaseUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return "(invalid URL)";
+  }
+}
+function endpointUrl(baseUrl, path) {
+  const url = new URL(baseUrl);
+  url.pathname = `${url.pathname.replace(/\/$/, "")}${path}`;
+  return url.toString();
+}
+function scrubUrls(text) {
+  return text.replace(/https?:\/\/[^\s"'<>,;)]+/gi, (match) => {
+    const url = match.replace(/\.+$/, "");
+    return reduceBaseUrl(url) + match.slice(url.length);
+  });
+}
+var MIN_SCRUBBED_QUERY_VALUE_LENGTH = 4;
+function scrubBaseUrlParts(text, baseUrl) {
+  let parsed;
+  try {
+    parsed = new URL(baseUrl);
+  } catch {
+    return text;
+  }
+  let out = text;
+  if (parsed.search !== "") out = out.split(parsed.search).join("");
+  if (parsed.pathname !== "" && parsed.pathname !== "/") out = out.split(parsed.pathname).join("");
+  const reduced = reduceBaseUrl(baseUrl);
+  const values = new Set(parsed.searchParams.values());
+  for (const pair of parsed.search.slice(1).split("&")) {
+    const eq = pair.indexOf("=");
+    if (eq !== -1) values.add(pair.slice(eq + 1));
+  }
+  const secrets = [...values].filter((value) => value.length >= MIN_SCRUBBED_QUERY_VALUE_LENGTH && !reduced.includes(value)).sort((a, b) => b.length - a.length);
+  if (secrets.length === 0) return out;
+  const alternatives = secrets.map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  const pattern = new RegExp(`(?<![A-Za-z0-9_-])(?:${alternatives})(?![A-Za-z0-9_-])`, "g");
+  return out.replace(pattern, "[redacted]");
+}
+var REDIRECT_REASON = "replied with a redirect, which LocHub does not follow for a Custom endpoint; set Base URL to the final address";
+var REDIRECT_MESSAGE = `the server ${REDIRECT_REASON}`;
+function isRedirectError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  const cause = error?.cause;
+  const causeMessage = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "";
+  return /redirect/i.test(message) || /redirect/i.test(causeMessage);
+}
+function authHeaders(keyHeader, apiKey) {
+  if (!apiKey) return {};
+  return keyHeader === "api-key" ? { "api-key": apiKey } : { authorization: `Bearer ${apiKey}` };
+}
+function balancedObjectEnd(text, start) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+var LEADING_THINK_BLOCK = /^\s*<think>[\s\S]*?<\/think>/i;
+function extractJsonObject(text, expectedKey) {
+  const withoutThink = text.replace(LEADING_THINK_BLOCK, "");
+  let start = withoutThink.indexOf("{");
+  let firstParseable;
+  while (start !== -1) {
+    const end = balancedObjectEnd(withoutThink, start);
+    if (end === -1) break;
+    const candidate = withoutThink.slice(start, end + 1);
+    try {
+      const parsed = JSON.parse(candidate);
+      if (firstParseable === void 0) firstParseable = candidate;
+      if (expectedKey !== void 0 && parsed !== null && typeof parsed === "object" && expectedKey in parsed) {
+        return candidate;
+      }
+    } catch {
+    }
+    start = withoutThink.indexOf("{", end + 1);
+  }
+  return firstParseable;
+}
+var PROBE_TIMEOUT_MS = 1e4;
+function isListed(model, listed) {
+  return listed.has(model) || !model.includes(":") && listed.has(`${model}:latest`);
+}
+function networkErrorCode(error) {
+  const cause = error?.cause;
+  if (cause && typeof cause.code === "string") return cause.code;
+  return error instanceof Error ? error.message : String(error);
+}
+function modelIdsOf(body) {
+  const data = body?.data;
+  if (!Array.isArray(data)) return void 0;
+  return data.flatMap((entry) => {
+    const id = entry?.id;
+    return typeof id === "string" ? [id] : [];
+  });
+}
+async function probeEndpoint(custom, models, apiKey, fetchImpl = fetch) {
+  const url = reduceBaseUrl(custom.baseUrl);
+  const result = (status, detail, missingModels) => ({
+    url,
+    status,
+    ...detail === void 0 ? {} : { detail: scrubUrls(redactSecrets(detail)) },
+    ...missingModels === void 0 ? {} : { missingModels }
+  });
+  let response;
+  try {
+    response = await fetchImpl(endpointUrl(custom.baseUrl, "/models"), {
+      method: "GET",
+      headers: authHeaders(custom.keyHeader, apiKey),
+      redirect: "error",
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS)
+    });
+  } catch (error) {
+    const timedOut = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+    if (timedOut) return result("unreachable", `${url} did not answer within 10 seconds.`);
+    if (isRedirectError(error)) return result("unreachable", `${url} ${REDIRECT_REASON}.`);
+    return result("unreachable", `Cannot reach ${url} (${networkErrorCode(error)}).`);
+  }
+  if (response.status === 401 || response.status === 403) {
+    return result("unreachable", `${url} refused the request (HTTP ${response.status}): check API Key and Key Header.`);
+  }
+  const noModelList = (why) => result("unknown", `${url} has no model list LocHub can read (GET /models ${why}).`);
+  if (!response.ok) return noModelList(`answered HTTP ${response.status}`);
+  let listedIds;
+  try {
+    listedIds = modelIdsOf(await response.json());
+  } catch {
+    listedIds = void 0;
+  }
+  if (!listedIds) return noModelList("returned no model list");
+  const listed = new Set(listedIds);
+  const missing = [...new Set(models)].filter((model) => !isListed(model, listed));
+  if (missing.length === 0) return result("ok");
+  return result("model_missing", `${url} does not list ${missing.join(", ")}.`, missing);
 }
 
 // src/contract.ts
@@ -142,14 +518,16 @@ function isOutdated(unit, cell) {
 function keepAudit(cell) {
   return cell.qaFlags.filter((flag) => flag === "audit");
 }
+var EXPORTED_AT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})?$/i;
+var IMPORT_OUTCOMES = ["changed", "approved", "changed_approved", "unchanged", "stale", "unknown", "empty", "conflict", "hard", "confirm"];
 
 // src/ids.ts
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 function unitIdOf(namespace, key) {
-  return createHash("sha256").update(JSON.stringify([namespace, key]), "utf8").digest("hex").slice(0, 16);
+  return createHash2("sha256").update(JSON.stringify([namespace, key]), "utf8").digest("hex").slice(0, 16);
 }
 function textHash(text) {
-  return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
+  return createHash2("sha256").update(text, "utf8").digest("hex").slice(0, 16);
 }
 function canonicalJson(value) {
   return JSON.stringify(sortKeys(value));
@@ -347,7 +725,122 @@ function isCosmeticChange(before, after) {
   return summarizeRichTags(before).names.join("|") === summarizeRichTags(after).names.join("|");
 }
 
+// src/lengthCheck.ts
+var LENGTH_CHECK_OFF = { mode: "off", scope: "ui", ratio: 1.3, extra: 4, ratios: {}, hint: true };
+var ESCAPABLE = /* @__PURE__ */ new Set(["`", "{", "}", "|"]);
+var TAG = /<(?:\/|[\w.-]+(?:\s+[\w.-]+="[^"]*")*\s*\/?)>/y;
+var NONSPACING_MARK = /^[\p{Mn}\p{Me}]$/u;
+var ZERO_WIDTH = /^[\u200B\u200C\u200D\uFEFF]$/;
+var WIDE = [
+  [4352, 4447],
+  // Hangul Jamo initial consonants
+  [11904, 12350],
+  // CJK and Kangxi radicals, ideographic description, CJK symbols and punctuation
+  [12353, 13311],
+  // Hiragana, Katakana, Bopomofo, Hangul compatibility Jamo, Kanbun, CJK strokes, enclosed CJK
+  [13312, 19903],
+  // CJK unified ideographs extension A
+  [19968, 40959],
+  // CJK unified ideographs
+  [43360, 43391],
+  // Hangul Jamo extended-A
+  [44032, 55203],
+  // Hangul syllables
+  [63744, 64255],
+  // CJK compatibility ideographs
+  [65072, 65103],
+  // CJK compatibility forms
+  [65280, 65376],
+  // Fullwidth forms
+  [65504, 65510],
+  // Fullwidth signs
+  [127744, 128591],
+  // Emoji: misc symbols and pictographs, emoticons
+  [129280, 129535],
+  // Emoji: supplemental symbols and pictographs
+  [131072, 262141]
+  // CJK unified ideographs extension B and later
+];
+function codePointWidth(codePoint) {
+  const char = String.fromCodePoint(codePoint);
+  if (NONSPACING_MARK.test(char) || ZERO_WIDTH.test(char)) return 0;
+  return WIDE.some(([first, last]) => codePoint >= first && codePoint <= last) ? 2 : 1;
+}
+var ENTITIES = ["&amp;", "&lt;", "&gt;", "&quot;"];
+function visibleLength(text) {
+  let length = 0;
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === "`" && i + 1 < text.length && ESCAPABLE.has(text[i + 1])) {
+      length += 1;
+      i += 2;
+      continue;
+    }
+    if (c === "&") {
+      const entity = ENTITIES.find((e) => text.startsWith(e, i));
+      if (entity) {
+        length += 1;
+        i += entity.length;
+        continue;
+      }
+    }
+    if (c === "<") {
+      TAG.lastIndex = i;
+      const tag = TAG.exec(text);
+      if (tag) {
+        i += tag[0].length;
+        continue;
+      }
+    }
+    if (c === "{") {
+      const end = text.indexOf("}", i + 1);
+      if (end >= 0) {
+        const modifier = text[end + 1] === "|" ? readModifier(text, end + 2) : void 0;
+        const parsed = modifier ? parseModifier(text.slice(i + 1, end).trim(), modifier.name, modifier.body) : void 0;
+        if (modifier && parsed && parsed.kind !== "other" && parsed.name === parsed.kind) {
+          const branches = [...Object.values(parsed.forms), ...parsed.positional];
+          length += Math.max(0, ...branches.map((branch) => visibleLength(branch)));
+          i = modifier.end;
+        } else {
+          i = end + 1;
+        }
+        continue;
+      }
+    }
+    const codePoint = text.codePointAt(i);
+    length += codePointWidth(codePoint);
+    i += codePoint > 65535 ? 2 : 1;
+  }
+  return length;
+}
+function ratioFor(culture, config) {
+  const entries = Object.entries(config.ratios);
+  const find = (code) => entries.find(([key]) => key.toLowerCase() === code.toLowerCase())?.[1];
+  return find(culture) ?? find(culture.split("-")[0]) ?? config.ratio;
+}
+function lengthLimitFor(unit, culture, config) {
+  if (config.mode === "off") return null;
+  if (config.scope === "ui" && unit.metadata[KIND_METADATA_KEY] !== "ui") return null;
+  const length = visibleLength(unit.source);
+  if (length === 0) return null;
+  return Math.ceil(length * Math.round(ratioFor(culture, config) * 100) / 100) + config.extra;
+}
+function lengthArgsOf(config) {
+  if (config.mode === "off") return "--length-check off";
+  const ratios = Object.entries(config.ratios).map(([culture, ratio]) => `${culture}=${ratio.toFixed(2)}`);
+  return [
+    `--length-check ${config.mode}`,
+    `--length-scope ${config.scope}`,
+    `--length-ratio ${config.ratio.toFixed(2)}`,
+    `--length-extra ${config.extra}`,
+    ...ratios.length > 0 ? [`--length-ratios ${ratios.join(",")}`] : [],
+    `--length-hint ${config.hint ? "on" : "off"}`
+  ].join(" ");
+}
+
 // src/precheck.ts
+var TOO_LONG_CODE = "too_long";
 var PLURAL_CATEGORIES = /* @__PURE__ */ new Set(["zero", "one", "two", "few", "many", "other"]);
 var PLURAL_FORM_NAME = /^[A-Za-z0-9_]+$/;
 function pluralCategories(culture, type) {
@@ -447,7 +940,27 @@ function precheck(source, translation, culture, opts) {
   const withoutDnt = opts.dntTerms.reduce((acc, t) => acc.split(t).join(""), source);
   if (translation.trim() === source.trim() && new RegExp("\\p{L}{3,}", "u").test(withoutDnt))
     issues.push({ code: "untranslated", severity: "soft", message: "Translation is identical to the source" });
+  if (opts.length) {
+    const length = visibleLength(translation);
+    if (length > opts.length.limit)
+      issues.push({
+        code: TOO_LONG_CODE,
+        severity: opts.length.severity,
+        message: `Too long for the UI: ${length}/${opts.length.limit} characters (Length Check in Project Settings)`
+      });
+  }
   return issues;
+}
+
+// src/triage.ts
+function bandFor(input) {
+  if (input.refused || blocksAutoAccept(input.precheck) || input.judge.some((j) => j.severity !== "minor")) return "R";
+  if (input.ambiguity === "guessed") return input.unit.metadata[KIND_METADATA_KEY] === "ui" ? "R" : "Y";
+  if (input.ambiguity === "context" || input.judge.length > 0 || input.precheck.length > 0) return "Y";
+  return "G";
+}
+function isAuditSample(unitId, culture, percent) {
+  return parseInt(textHash(`${unitId}|${culture}|audit`).slice(0, 8), 16) % 100 < percent;
 }
 
 // src/cells.ts
@@ -480,22 +993,25 @@ function requireUnit(store, unitId) {
   if (!unit || unit.state !== "active") throw new CellActionError(`Unknown unit ${unitId}`, 404);
   return unit;
 }
-function precheckOptionsFor(store, culture) {
-  return { dntTerms: dntTermsOf(store, culture), plurals: (type) => store.pluralCategoriesFor(culture, type) };
+function precheckOptionsFor(store, culture, unit, lengthCheck) {
+  const options = { dntTerms: dntTermsOf(store, culture), plurals: (type) => store.pluralCategoriesFor(culture, type) };
+  const limit = lengthLimitFor(unit, culture, lengthCheck);
+  if (limit !== null) options.length = { limit, severity: lengthCheck.mode === "confirm" ? "confirm" : "soft" };
+  return options;
 }
-function checkTranslation(store, culture, unit, text) {
-  return precheck(unit.source, text, culture, precheckOptionsFor(store, culture));
+function checkTranslation(store, culture, unit, text, lengthCheck) {
+  return precheck(unit.source, text, culture, precheckOptionsFor(store, culture, unit, lengthCheck));
 }
-function checkCell(store, culture, unitId, text) {
-  return checkTranslation(store, culture, requireUnit(store, unitId), text);
+function checkCell(store, culture, unitId, text, lengthCheck = LENGTH_CHECK_OFF) {
+  return checkTranslation(store, culture, requireUnit(store, unitId), text, lengthCheck);
 }
-function checkOrThrow(store, culture, unit, text, accept) {
-  const issues = checkTranslation(store, culture, unit, text);
+function checkOrThrow(store, culture, unit, text, accept, lengthCheck) {
+  const issues = checkTranslation(store, culture, unit, text, lengthCheck);
   if (hasHardIssues(issues)) throw new CellActionError("Translation fails the format check", 422, issues);
   const accepted = confirmCodes(issues);
   const unconfirmed = accepted.filter((code) => !accept.includes(code));
   if (unconfirmed.length > 0) throw new CellActionError(`Confirm these warnings to go ahead anyway: ${unconfirmed.join(", ")}`, 422, issues);
-  return accepted;
+  return { issues, accepted };
 }
 function commit(store, before, after, action, actor, accepted = []) {
   store.putCell(after);
@@ -511,49 +1027,42 @@ function commit(store, before, after, action, actor, accepted = []) {
   });
   return after;
 }
-function approveCell(store, culture, unitId, actor, expected, accept = []) {
+function approvedCell(unit, cell) {
+  return { ...cell, status: "approved", basedOnSourceRev: unit.sourceRev, basedOnSource: unit.source, qaFlags: keepAudit(cell), revision: cell.revision + 1 };
+}
+function editedCell(unit, cell, text, actor) {
+  return {
+    ...cell,
+    text,
+    status: "edited",
+    basedOnSourceRev: unit.sourceRev,
+    basedOnSource: unit.source,
+    provenance: `human:${actor}`,
+    ambiguity: "none",
+    alts: [],
+    question: "",
+    note: "",
+    suggestion: "",
+    judgeIssues: [],
+    qaFlags: keepAudit(cell),
+    revision: cell.revision + 1
+  };
+}
+function approveCell(store, culture, unitId, actor, expected, accept = [], lengthCheck = LENGTH_CHECK_OFF) {
   const unit = requireUnit(store, unitId);
   const cell = store.getCell(culture, unitId);
   checkFresh(unit, cell, expected);
   if (cell.text.length === 0) throw new CellActionError("Nothing to approve");
-  const accepted = checkOrThrow(store, culture, unit, cell.text, accept);
-  return commit(
-    store,
-    cell,
-    { ...cell, status: "approved", basedOnSourceRev: unit.sourceRev, basedOnSource: unit.source, qaFlags: keepAudit(cell), revision: cell.revision + 1 },
-    "approve",
-    actor,
-    accepted
-  );
+  const { accepted } = checkOrThrow(store, culture, unit, cell.text, accept, lengthCheck);
+  return commit(store, cell, approvedCell(unit, cell), "approve", actor, accepted);
 }
-function editCell(store, culture, unitId, text, actor, expected, accept = []) {
+function editCell(store, culture, unitId, text, actor, expected, accept = [], lengthCheck = LENGTH_CHECK_OFF) {
   const unit = requireUnit(store, unitId);
   const cell = store.getCell(culture, unitId);
   checkFresh(unit, cell, expected);
-  const accepted = checkOrThrow(store, culture, unit, text, accept);
-  return commit(
-    store,
-    cell,
-    {
-      ...cell,
-      text,
-      status: "edited",
-      basedOnSourceRev: unit.sourceRev,
-      basedOnSource: unit.source,
-      provenance: `human:${actor}`,
-      ambiguity: "none",
-      alts: [],
-      question: "",
-      note: "",
-      suggestion: "",
-      judgeIssues: [],
-      qaFlags: keepAudit(cell),
-      revision: cell.revision + 1
-    },
-    "edit",
-    actor,
-    accepted
-  );
+  const { issues, accepted } = checkOrThrow(store, culture, unit, text, accept, lengthCheck);
+  const band = bandFor({ unit, ambiguity: "none", precheck: issues, judge: [], refused: false });
+  return commit(store, cell, { ...editedCell(unit, cell, text, actor), band }, "edit", actor, accepted);
 }
 function rejectCell(store, culture, unitId, note, actor, expected) {
   const unit = requireUnit(store, unitId);
@@ -651,115 +1160,12 @@ function buildGroups(items, maxSize) {
 }
 
 // src/llm.ts
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync as renameSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { join as join2 } from "node:path";
 import { Anthropic } from "../../Source/ThirdParty/LocHubNodeDeps/lochub_node_deps.mjs";
-
-// src/llmShared.ts
-var REQUEST_TIMEOUT_MS = 10 * 60 * 1e3;
-var BATCH_UNAVAILABLE_MESSAGE = "Batch mode is only available for Anthropic with an API key.";
-var MISSING_KEY_MESSAGE = "No API key: enter it in Project Settings > Plugins > LocHub > AI > API Key.";
-function systemTextOf(params) {
-  const { system } = params;
-  if (!system) return "";
-  if (typeof system === "string") return system;
-  return system.filter((block) => block.type === "text").map((block) => block.text).join("\n\n");
-}
-function userTextOf(params) {
-  const first = params.messages[0];
-  if (!first) return "";
-  return typeof first.content === "string" ? first.content : JSON.stringify(first.content);
-}
-function schemaOf(params) {
-  return params.output_config?.format?.schema ?? {};
-}
-function effortOf(params) {
-  const effort = params.output_config?.effort;
-  return typeof effort === "string" ? effort : void 0;
-}
-function approxInputTokens(params) {
-  return Math.ceil((systemTextOf(params).length + userTextOf(params).length) / 3);
-}
-var KEY_ENV_VAR = "LOCHUB_API_KEY";
-var SECRET_SHAPED_PATTERNS = [
-  /(?<![A-Za-z0-9])sk-[A-Za-z0-9_*-]{6,}/g,
-  /(?<![A-Za-z0-9])xai-[A-Za-z0-9_*-]{6,}/g,
-  /AIza[0-9A-Za-z_-]{10,}/g,
-  /Bearer\s+\S+/g
-];
-function redactSecrets(text) {
-  let out = text;
-  const value = process.env[KEY_ENV_VAR];
-  if (value) out = out.split(value).join("[redacted]");
-  for (const pattern of SECRET_SHAPED_PATTERNS) out = out.replace(pattern, "[redacted]");
-  return out;
-}
-var FETCH_RETRY_MAX_RETRIES = 2;
-var RETRY_AFTER_CAP_MS = 6e4;
-var BACKOFF_BASE_MS = 500;
-var BACKOFF_CAP_MS = 8e3;
-var BACKOFF_JITTER_RATIO = 0.25;
-var TRANSIENT_STATUSES = /* @__PURE__ */ new Set([408, 409, 429]);
-function isTransientStatus(status) {
-  return TRANSIENT_STATUSES.has(status) || status >= 500;
-}
-function sleep(ms) {
-  return new Promise((resolve4) => setTimeout(resolve4, ms));
-}
-function jitteredBackoffMs(attempt) {
-  const base = Math.min(BACKOFF_BASE_MS * 2 ** attempt, BACKOFF_CAP_MS);
-  const jitter = base * BACKOFF_JITTER_RATIO;
-  return Math.min(Math.max(base - jitter + Math.random() * (2 * jitter), 0), BACKOFF_CAP_MS);
-}
-function retryAfterMsFrom(headers) {
-  const ms = headers.get("retry-after-ms");
-  if (ms !== null) {
-    const parsed = Number(ms);
-    if (Number.isFinite(parsed) && parsed >= 0) return Math.min(parsed, RETRY_AFTER_CAP_MS);
-  }
-  const after = headers.get("retry-after");
-  if (after === null) return void 0;
-  const seconds = Number(after);
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1e3, RETRY_AFTER_CAP_MS);
-  const at = Date.parse(after);
-  if (Number.isNaN(at)) return void 0;
-  return Math.min(Math.max(at - Date.now(), 0), RETRY_AFTER_CAP_MS);
-}
-async function fetchWithRetry(url, buildInit, opts) {
-  for (let attempt = 0; ; attempt++) {
-    let response;
-    try {
-      response = await opts.fetchImpl(url, buildInit());
-    } catch (networkError) {
-      if (attempt >= FETCH_RETRY_MAX_RETRIES) return { networkError };
-      await sleep(jitteredBackoffMs(attempt));
-      continue;
-    }
-    const json = await response.json().catch(() => ({}));
-    const isFinal = opts.isFinal?.(response.status, json) ?? false;
-    if (isFinal || !isTransientStatus(response.status) || attempt >= FETCH_RETRY_MAX_RETRIES) return { status: response.status, json };
-    await sleep(retryAfterMsFrom(response.headers) ?? jitteredBackoffMs(attempt));
-  }
-}
-async function runPool(requests, concurrency, runOne, onOutcome) {
-  const out = new Array(requests.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < requests.length) {
-      const index = next++;
-      const outcome = await runOne(requests[index]);
-      out[index] = outcome;
-      onOutcome?.(outcome);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, requests.length)) }, worker));
-  return out;
-}
-
-// src/llm.ts
 function requestId(params) {
-  return createHash2("sha256").update(canonicalJson(params), "utf8").digest("hex");
+  return createHash3("sha256").update(canonicalJson(params), "utf8").digest("hex");
 }
 function outcomeFromMessage(customId, message) {
   if (message.stop_reason === "refusal") return { customId, kind: "refusal" };
@@ -782,7 +1188,7 @@ var FINAL_BATCH_ERRORS = /* @__PURE__ */ new Set(["invalid_request_error", "auth
 var MAX_RETRIEVE_FAILURES = 10;
 var MAX_BACKOFF_MS = 6e4;
 function batchKey(customIds) {
-  return createHash2("sha256").update([...customIds].sort().join("\n"), "utf8").digest("hex");
+  return createHash3("sha256").update([...customIds].sort().join("\n"), "utf8").digest("hex");
 }
 function writeFileAtomic2(path, content) {
   const tmp = `${path}.tmp`;
@@ -810,6 +1216,8 @@ var AnthropicLlmClient = class {
     this.hasKey = options.client !== void 0 || !!options.apiKey;
     this.batchDir = options.batchDir;
   }
+  // Ignores LlmClient.runSync's shouldContinue (see there): the SDK retries its own timeouts and reports none the
+  // job probes on.
   async runSync(requests, concurrency, onOutcome) {
     if (!this.hasKey) {
       const out2 = requests.map((r) => ({ customId: r.customId, kind: "error", message: `Anthropic: ${MISSING_KEY_MESSAGE}`, retryable: false }));
@@ -991,7 +1399,7 @@ function answersByUnit(store) {
 }
 
 // src/prompt.ts
-var PROMPT_VERSION = "translate-v1";
+var PROMPT_VERSION = "translate-v2";
 var TRANSLATE_RULES = [
   "You translate video game strings from English into the target culture for an Unreal Engine 5 game.",
   "Hard rules:",
@@ -1016,6 +1424,7 @@ var TRANSLATE_RULES = [
   "- If an item has rejected_translation, a reviewer rejected that text: return a different translation.",
   "- neighbors are already translated strings of the same screen or asset: stay consistent with them.",
   "- If an item has previous_attempt and errors, return a corrected translation that fixes every listed error.",
+  "- If an item has maxLength, keep the translation within maxLength visible characters: placeholders and tags count 0, CJK characters count 2. Prefer a natural shorter wording over abbreviations.",
   "Return exactly one result per input id."
 ].join("\n");
 var JUDGE_RULES = [
@@ -1096,7 +1505,7 @@ function systemBlocks(rules, ctx) {
   ];
 }
 function buildTranslateParams(ctx, group, model, extras = {}) {
-  const { repair, neighbors = [], answers } = extras;
+  const { repair, neighbors = [], answers, maxLength } = extras;
   const items = group.items.map(({ unit, cell }) => {
     const item = {
       id: unit.id,
@@ -1120,6 +1529,8 @@ function buildTranslateParams(ctx, group, model, extras = {}) {
       item.previous_attempt = fix.previous;
       item.errors = fix.errors;
     }
+    const limit = maxLength?.get(unit.id);
+    if (limit !== void 0) item.maxLength = limit;
     return item;
   });
   const body = { group: group.groupKey };
@@ -1144,17 +1555,6 @@ function buildJudgeParams(ctx, group, translations, model) {
   };
 }
 
-// src/triage.ts
-function bandFor(input) {
-  if (input.refused || blocksAutoAccept(input.precheck) || input.judge.some((j) => j.severity !== "minor")) return "R";
-  if (input.ambiguity === "guessed") return input.unit.metadata[KIND_METADATA_KEY] === "ui" ? "R" : "Y";
-  if (input.ambiguity === "context" || input.judge.length > 0 || input.precheck.length > 0) return "Y";
-  return "G";
-}
-function isAuditSample(unitId, culture, percent) {
-  return parseInt(textHash(`${unitId}|${culture}|audit`).slice(0, 8), 16) % 100 < percent;
-}
-
 // src/job.ts
 var DEFAULT_JOB_OPTIONS = {
   mode: "sync",
@@ -1166,7 +1566,8 @@ var DEFAULT_JOB_OPTIONS = {
   pollMs: 6e4,
   maxRepairRounds: 2,
   auditPercent: 4,
-  actor: "ai"
+  actor: "ai",
+  lengthCheck: LENGTH_CHECK_OFF
 };
 var MAX_NEIGHBORS = 20;
 var AMBIGUITIES = ["none", "context", "guessed"];
@@ -1174,6 +1575,7 @@ var SEVERITIES = ["minor", "major", "critical"];
 var MAX_TRANSLATE_ATTEMPTS = 4;
 var MAX_ERROR_SAMPLES = 3;
 var MAX_ERROR_SAMPLE_LENGTH = 300;
+var SHORTEN_INSTRUCTION = "Shorten it while keeping the meaning, every placeholder and every tag.";
 function cultureContext(store, culture, brief) {
   return {
     culture,
@@ -1185,14 +1587,14 @@ function cultureContext(store, culture, brief) {
 }
 function planWork(store, opts) {
   const tm = buildTmIndex(store, opts.culture);
-  const checkOptions = precheckOptionsFor(store, opts.culture);
   const tmHits = [];
   const rest = [];
   for (const item of selectWork(store, opts.culture, opts.filter)) {
     const eligible = item.cell.status !== "rejected" && item.cell.status !== "needs_fix";
     const match = eligible ? tm.get(item.unit.source) : void 0;
-    const reusable = match !== void 0 && match.donorId !== item.unit.id && !blocksAutoAccept(precheck(item.unit.source, match.text, opts.culture, checkOptions));
-    if (reusable) tmHits.push({ item, match });
+    const issues = match ? precheck(item.unit.source, match.text, opts.culture, precheckOptionsFor(store, opts.culture, item.unit, opts.lengthCheck)) : void 0;
+    const reusable = match !== void 0 && match.donorId !== item.unit.id && !blocksAutoAccept(issues);
+    if (reusable) tmHits.push({ item, match, issues });
     else rest.push(item);
   }
   return { ctx: cultureContext(store, opts.culture, opts.brief), tmHits, groups: buildGroups(rest, opts.groupSize) };
@@ -1205,8 +1607,21 @@ function translateParamsFor(store, ctx, group, opts, repair) {
   return buildTranslateParams(ctx, group, opts.translateModel, {
     repair,
     neighbors: neighborsOf(store, opts.culture, group.groupKey, exclude, MAX_NEIGHBORS),
-    answers: answersByUnit(store)
+    answers: answersByUnit(store),
+    maxLength: promptLimits(group, opts)
   });
+}
+function promptLimits(group, opts) {
+  const limits = /* @__PURE__ */ new Map();
+  if (!opts.lengthCheck.hint) return limits;
+  for (const { unit } of group.items) {
+    const limit = lengthLimitFor(unit, opts.culture, opts.lengthCheck);
+    if (limit !== null) limits.set(unit.id, limit);
+  }
+  return limits;
+}
+function repairMessage(issue) {
+  return issue.code === TOO_LONG_CODE ? `${issue.message}. ${SHORTEN_INSTRUCTION}` : issue.message;
 }
 function parseTranslatedItems(text, group) {
   const wanted = new Set(group.items.map((w) => w.unit.id));
@@ -1263,12 +1678,25 @@ function splitGroup(group) {
     { groupKey: group.groupKey, items: group.items.slice(middle) }
   ];
 }
+function capGroup(group, max) {
+  const count = group.items.length;
+  if (count <= max) return [group];
+  const pieces = Math.ceil(count / max);
+  return Array.from({ length: pieces }, (_, i) => ({
+    groupKey: group.groupKey,
+    items: group.items.slice(Math.floor(i * count / pieces), Math.floor((i + 1) * count / pieces))
+  }));
+}
+function isTimeoutOutcome(outcome) {
+  return outcome.kind === "error" && isTimeoutMessage(outcome.message);
+}
 function toRequest(params) {
   return { customId: requestId(params), params };
 }
 function translateSettledIds(outcome, group, parsed) {
+  if (outcome.kind === "skipped") return [];
   if (outcome.kind === "ok") return [...(parsed ?? parseTranslatedItems(outcome.text, group)).items.keys()];
-  if (outcome.kind === "refusal" || outcome.kind === "error" && outcome.message === "max_tokens")
+  if (outcome.kind === "refusal" || outcome.kind === "error" && (outcome.message === "max_tokens" || isTimeoutMessage(outcome.message)))
     return group.items.length > 1 ? [] : [group.items[0].unit.id];
   if (outcome.kind === "error" && outcome.retryable) return [];
   return group.items.map((w) => w.unit.id);
@@ -1296,8 +1724,9 @@ async function runTranslateJob(store, llm, cache, opts) {
   if (report.requested === 0) return report;
   const now = (/* @__PURE__ */ new Date()).toISOString();
   store.assertFresh();
-  for (const { item, match } of plan.tmHits) {
+  for (const { item, match, issues } of plan.tmHits) {
     const cell = store.getCell(culture, item.unit.id);
+    const tooLong2 = issues.some((i) => i.code === TOO_LONG_CODE);
     store.putCell({
       ...cell,
       text: match.text,
@@ -1311,13 +1740,13 @@ async function runTranslateJob(store, llm, cache, opts) {
       note: "",
       suggestion: "",
       judgeIssues: [],
-      qaFlags: [...keepAudit(cell), "tm"],
-      band: "G",
+      qaFlags: [...keepAudit(cell), "tm", ...tooLong2 ? [TOO_LONG_CODE] : []],
+      band: tooLong2 ? "Y" : "G",
       revision: cell.revision + 1
     });
     store.appendEvent({ ts: now, unitId: item.unit.id, culture, action: "tm", actor: opts.actor, before: cell.text, after: match.text });
     report.tm++;
-    report.bands.G++;
+    report.bands[tooLong2 ? "Y" : "G"]++;
   }
   if (plan.tmHits.length > 0) store.save();
   if (work.length === 0) {
@@ -1330,16 +1759,17 @@ async function runTranslateJob(store, llm, cache, opts) {
   const failed = /* @__PURE__ */ new Map();
   const errorMessages = /* @__PURE__ */ new Map();
   const seen = /* @__PURE__ */ new Set();
-  const resolve4 = async (requests, onOutcome, onBatchProgress) => {
+  const resolve4 = async (requests, onOutcome, onBatchProgress, shouldContinue) => {
     const outcomes = await resolveWithCache(llm, cache, requests, {
       mode: opts.mode,
       concurrency: opts.concurrency,
       pollMs: opts.pollMs,
       fresh: seen,
       onOutcome,
-      onBatchProgress
+      onBatchProgress,
+      shouldContinue
     });
-    for (const r of requests) seen.add(r.customId);
+    for (const r of requests) if (outcomes.get(r.customId)?.kind !== "skipped") seen.add(r.customId);
     for (const o of outcomes.values()) {
       if (o.kind !== "ok") continue;
       report.inputTokens += o.inputTokens;
@@ -1366,8 +1796,13 @@ async function runTranslateJob(store, llm, cache, opts) {
   reportTranslate(0);
   const maxTranslateRounds = MAX_TRANSLATE_ATTEMPTS + Math.ceil(Math.log2(Math.max(2, opts.groupSize)));
   const lastReason = /* @__PURE__ */ new Map();
+  let answered = false;
+  let probing = false;
+  let largestAnswered = 0;
+  let held = [];
   let pending = plan.groups;
-  for (let attempt = 0; pending.length > 0 && attempt < maxTranslateRounds; attempt++) {
+  let budgetUsed = 0;
+  for (let round = 0; pending.length > 0 && budgetUsed < maxTranslateRounds; round++) {
     const requests = pending.map((group) => ({ group, request: toRequest(translateParamsFor(store, ctx, group, opts)) }));
     for (const { group, request } of requests) if (bypassesCache(group)) seen.add(request.customId);
     const groupByCustomId = new Map(requests.map((r) => [r.request.customId, r.group]));
@@ -1375,10 +1810,19 @@ async function runTranslateJob(store, llm, cache, opts) {
     const roundItemsTotal = pending.reduce((sum, g) => sum + g.items.length, 0);
     const settledBeforeRound = translateSettled.size;
     let roundRemaining;
+    let roundStalled = false;
     const outcomes = await resolve4(
       requests.map((r) => r.request),
       (outcome) => {
         const group = groupByCustomId.get(outcome.customId);
+        if (outcome.kind === "ok") {
+          answered = true;
+          largestAnswered = Math.max(largestAnswered, group.items.length);
+        } else if (!answered && isTimeoutOutcome(outcome)) {
+          roundStalled = true;
+          probing = true;
+          return;
+        }
         const parsed = outcome.kind === "ok" ? parseTranslatedItems(outcome.text, group) : void 0;
         if (parsed) parsedByCustomId.set(outcome.customId, parsed);
         markTranslateSettled(translateSettledIds(outcome, group, parsed));
@@ -1388,9 +1832,10 @@ async function runTranslateJob(store, llm, cache, opts) {
         const cap = Math.max(0, roundRemaining - 1);
         const estimate = Math.min(cap, Math.floor(roundRemaining * succeeded / Math.max(1, total)));
         reportTranslate(translateSettled.size + estimate);
-      }
+      },
+      () => !roundStalled
     );
-    if (attempt === 0 && requests.length > 0) {
+    if (round === 0 && requests.length > 0) {
       const roundOutcomes = requests.map((r) => outcomes.get(r.request.customId));
       const firstHardError = roundOutcomes.find((o) => o.kind === "error" && !o.retryable);
       if (firstHardError && roundOutcomes.every((o) => o.kind === "error" && !o.retryable)) {
@@ -1398,21 +1843,34 @@ async function runTranslateJob(store, llm, cache, opts) {
       }
     }
     const retry = [];
+    const skipped = [];
+    const timedOut = [];
     for (const { group, request } of requests) {
       const outcome = outcomes.get(request.customId);
-      if (outcome.kind === "ok") {
+      if (outcome.kind === "skipped") {
+        skipped.push(group);
+      } else if (!answered && isTimeoutOutcome(outcome)) {
+        for (const w of group.items) {
+          lastReason.set(w.unit.id, "error");
+          errorMessages.set(w.unit.id, outcome.message);
+        }
+        timedOut.push({ group, message: outcome.message });
+      } else if (outcome.kind === "ok") {
         const parsed = parsedByCustomId.get(request.customId);
         for (const [id, item] of parsed.items) results.set(id, item);
         if (parsed.missing.length > 0) {
           for (const w of parsed.missing) errorMessages.set(w.unit.id, "The model returned no translation for this string.");
           retry.push({ groupKey: group.groupKey, items: parsed.missing });
         }
-      } else if (outcome.kind === "refusal" || outcome.kind === "error" && outcome.message === "max_tokens") {
+      } else if (outcome.kind === "refusal" || outcome.kind === "error" && (outcome.message === "max_tokens" || isTimeoutMessage(outcome.message))) {
         const reason = outcome.kind === "refusal" ? "refused" : "error";
         for (const w of group.items) lastReason.set(w.unit.id, reason);
         if (outcome.kind === "error") for (const w of group.items) errorMessages.set(w.unit.id, outcome.message);
         if (group.items.length > 1) retry.push(...splitGroup(group));
-        else failed.set(group.items[0].unit.id, reason);
+        else {
+          failed.set(group.items[0].unit.id, reason);
+          markTranslateSettled([group.items[0].unit.id]);
+        }
       } else if (outcome.kind === "error" && outcome.retryable) {
         for (const w of group.items) {
           lastReason.set(w.unit.id, "error");
@@ -1426,24 +1884,58 @@ async function runTranslateJob(store, llm, cache, opts) {
         }
       }
     }
-    pending = retry;
+    if (timedOut.length > 0) {
+      const probe = timedOut.reduce((largest, t) => t.group.items.length > largest.group.items.length ? t : largest);
+      if (probe.group.items.length === 1) throw new Error(redactSecrets(probe.message));
+      for (const group of skipped) for (const w of group.items) {
+        lastReason.set(w.unit.id, "error");
+        errorMessages.set(w.unit.id, probe.message);
+      }
+      held.push(...skipped, ...retry, ...timedOut.filter((t) => t !== probe).map((t) => t.group));
+      pending = splitGroup(probe.group);
+      continue;
+    }
+    retry.push(...skipped);
+    if (probing && answered) {
+      pending = [...retry, ...held].flatMap((group) => capGroup(group, largestAnswered));
+      held = [];
+      probing = false;
+    } else if (retry.length === 0 && held.length > 0) {
+      pending = held;
+      held = [];
+    } else {
+      pending = retry;
+    }
+    budgetUsed++;
   }
-  for (const group of pending)
+  for (const group of [...pending, ...held])
     for (const w of group.items) if (!results.has(w.unit.id) && !failed.has(w.unit.id)) failed.set(w.unit.id, lastReason.get(w.unit.id) ?? "error");
   markTranslateSettled(work.map((w) => w.unit.id));
-  const checkOptions = precheckOptionsFor(store, culture);
   const checks = /* @__PURE__ */ new Map();
-  const recheck = () => {
-    for (const [id, item] of results) checks.set(id, precheck(byId.get(id).unit.source, item.translation, culture, checkOptions));
+  const recheck = (ids) => {
+    for (const id of ids ?? results.keys()) {
+      const item = results.get(id);
+      if (!item) continue;
+      const { unit } = byId.get(id);
+      checks.set(id, precheck(unit.source, item.translation, culture, precheckOptionsFor(store, culture, unit, opts.lengthCheck)));
+    }
   };
   recheck();
+  const lengthRepaired = /* @__PURE__ */ new Set();
+  const tooLong = (id) => checks.get(id).some((i) => i.code === TOO_LONG_CODE);
   for (let round = 0; round < opts.maxRepairRounds; round++) {
-    const broken = [...results.keys()].filter((id) => blocksAutoAccept(checks.get(id)));
+    const broken = [...results.keys()].filter((id) => blocksAutoAccept(checks.get(id)) || tooLong(id) && !lengthRepaired.has(id));
     if (broken.length === 0) break;
+    const safeBefore = broken.filter((id) => !blocksAutoAccept(checks.get(id)));
+    const previousItems = new Map(safeBefore.map((id) => [id, results.get(id)]));
+    for (const id of broken) if (tooLong(id)) lengthRepaired.add(id);
     const repairTotal = broken.length;
     let repairDone = 0;
     const repair = new Map(
-      broken.map((id) => [id, { previous: results.get(id).translation, errors: checks.get(id).filter((i) => i.severity !== "soft").map((i) => i.message) }])
+      broken.map((id) => [
+        id,
+        { previous: results.get(id).translation, errors: checks.get(id).filter((i) => i.severity !== "soft" || i.code === TOO_LONG_CODE).map(repairMessage) }
+      ])
     );
     const groups = buildGroups(broken.map((id) => byId.get(id)), opts.groupSize);
     const requests = groups.map((group) => ({ group, request: toRequest(translateParamsFor(store, ctx, group, opts, repair)) }));
@@ -1460,6 +1952,8 @@ async function runTranslateJob(store, llm, cache, opts) {
       for (const [id, item] of parseTranslatedItems(outcome.text, group).items) results.set(id, item);
     }
     recheck();
+    for (const [id, previous] of previousItems) if (blocksAutoAccept(checks.get(id))) results.set(id, previous);
+    if (previousItems.size > 0) recheck(previousItems.keys());
   }
   const sampledErrorMessages = /* @__PURE__ */ new Set();
   const addErrorSample = (message) => {
@@ -1569,12 +2063,12 @@ async function runTranslateJob(store, llm, cache, opts) {
 }
 
 // src/providers.ts
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 import { join as join4 } from "node:path";
 
 // src/claudeCode.ts
 import { spawn } from "node:child_process";
-import { createHash as createHash3, randomUUID } from "node:crypto";
+import { createHash as createHash4, randomUUID } from "node:crypto";
 import { mkdirSync as mkdirSync3, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as join3 } from "node:path";
@@ -1620,7 +2114,7 @@ function isolatedRoot() {
   return join3(tmpdir(), "lochub-claude");
 }
 function isolatedCwd(projectDir) {
-  const hash = createHash3("sha1").update(projectDir, "utf8").digest("hex").slice(0, 12);
+  const hash = createHash4("sha1").update(projectDir, "utf8").digest("hex").slice(0, 12);
   return join3(isolatedRoot(), hash);
 }
 function buildArgs(params, systemPromptFile) {
@@ -1691,6 +2185,8 @@ var ClaudeCodeLlmClient = class {
     mkdirSync3(this.cwd, { recursive: true });
     mkdirSync3(this.promptsDir, { recursive: true });
   }
+  // Ignores LlmClient.runSync's shouldContinue (see there): a timed-out `claude` child is reported as an ordinary
+  // retryable error, not a timeout the job probes on.
   async runSync(requests, concurrency, onOutcome) {
     const out = new Array(requests.length);
     let next = 0;
@@ -1783,8 +2279,8 @@ var GeminiLlmClient = class {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.apiKey = options.apiKey;
   }
-  async runSync(requests, concurrency, onOutcome) {
-    return runPool(requests, concurrency, (request) => this.runOne(request), onOutcome);
+  async runSync(requests, concurrency, onOutcome, shouldContinue) {
+    return runPool(requests, concurrency, (request) => this.runOne(request), onOutcome, shouldContinue);
   }
   async runBatch(_requests, _pollMs) {
     throw new Error(BATCH_UNAVAILABLE_MESSAGE);
@@ -1806,8 +2302,8 @@ var GeminiLlmClient = class {
     );
     if ("networkError" in result) {
       const { networkError } = result;
-      const timedOut = networkError instanceof Error && (networkError.name === "TimeoutError" || networkError.name === "AbortError");
-      const message = timedOut ? "the request timed out after 10 minutes" : networkError instanceof Error ? networkError.message : String(networkError);
+      const timedOut = isFetchTimeout(networkError);
+      const message = timedOut ? timeoutMessage(timedOutAfterMs(networkError, REQUEST_TIMEOUT_MS)) : networkError instanceof Error ? networkError.message : String(networkError);
       return { customId: request.customId, kind: "error", message: `Gemini: ${message}`, retryable: true };
     }
     return outcomeFromGenerateResponse(request.customId, result.status, result.json);
@@ -1816,10 +2312,61 @@ var GeminiLlmClient = class {
 
 // src/openaiCompatible.ts
 var OPENAI_COMPATIBLE_PROFILES = {
-  openai: { label: "OpenAI", baseUrl: "https://api.openai.com/v1", schemaMode: "json_schema", maxTokensField: "max_completion_tokens", sendsEffort: true, reasoningAddsToOutput: false },
-  xai: { label: "xAI", baseUrl: "https://api.x.ai/v1", schemaMode: "json_schema", maxTokensField: "max_completion_tokens", sendsEffort: true, reasoningAddsToOutput: true },
-  deepseek: { label: "DeepSeek", baseUrl: "https://api.deepseek.com", schemaMode: "json_object", maxTokensField: "max_tokens", sendsEffort: false, reasoningAddsToOutput: false }
+  openai: {
+    label: "OpenAI",
+    baseUrl: "https://api.openai.com/v1",
+    schemaMode: "json_schema",
+    maxTokensField: "max_completion_tokens",
+    sendsEffort: true,
+    reasoningAddsToOutput: false,
+    keyHeader: "bearer",
+    keyRequired: true,
+    requestTimeoutMs: REQUEST_TIMEOUT_MS,
+    tolerantJson: false,
+    retryTimeouts: true
+  },
+  xai: {
+    label: "xAI",
+    baseUrl: "https://api.x.ai/v1",
+    schemaMode: "json_schema",
+    maxTokensField: "max_completion_tokens",
+    sendsEffort: true,
+    reasoningAddsToOutput: true,
+    keyHeader: "bearer",
+    keyRequired: true,
+    requestTimeoutMs: REQUEST_TIMEOUT_MS,
+    tolerantJson: false,
+    retryTimeouts: true
+  },
+  deepseek: {
+    label: "DeepSeek",
+    baseUrl: "https://api.deepseek.com",
+    schemaMode: "json_object",
+    maxTokensField: "max_tokens",
+    sendsEffort: false,
+    reasoningAddsToOutput: false,
+    keyHeader: "bearer",
+    keyRequired: true,
+    requestTimeoutMs: REQUEST_TIMEOUT_MS,
+    tolerantJson: false,
+    retryTimeouts: true
+  }
 };
+function customProfileOf(custom) {
+  return {
+    label: "Custom",
+    baseUrl: custom.baseUrl,
+    schemaMode: custom.structuredOutput,
+    maxTokensField: null,
+    sendsEffort: false,
+    reasoningAddsToOutput: false,
+    keyHeader: custom.keyHeader,
+    keyRequired: false,
+    requestTimeoutMs: custom.requestTimeoutSeconds * 1e3,
+    tolerantJson: true,
+    retryTimeouts: false
+  };
+}
 var SCHEMA_NAME = "lochub_response";
 var JSON_OBJECT_INSTRUCTION = "Answer with one JSON object that matches this JSON Schema:";
 var FINAL_ERROR_CODES = /* @__PURE__ */ new Set(["credit_balance_exhausted", "insufficient_quota"]);
@@ -1834,7 +2381,7 @@ function buildChatBody(profile, params) {
 
 ${JSON_OBJECT_INSTRUCTION}
 ${JSON.stringify(schema)}`;
-    responseFormat = { type: "json_object" };
+    if (profile.schemaMode === "json_object") responseFormat = { type: "json_object" };
   }
   const body = {
     model: params.model,
@@ -1842,8 +2389,10 @@ ${JSON.stringify(schema)}`;
       { role: "system", content: system },
       { role: "user", content: userTextOf(params) }
     ],
-    response_format: responseFormat,
-    [profile.maxTokensField]: params.max_tokens
+    ...responseFormat === void 0 ? {} : { response_format: responseFormat },
+    // I-2: a Custom endpoint's profile.maxTokensField is null -- neither field is sent, and the server's own
+    // default applies instead of a fixed 16000 that an ordinary-context vLLM/TGI deployment would refuse outright.
+    ...profile.maxTokensField === null ? {} : { [profile.maxTokensField]: params.max_tokens }
   };
   const effort = effortOf(params);
   if (profile.sendsEffort && effort) body.reasoning_effort = effort;
@@ -1853,33 +2402,77 @@ function isRetryableStatus(status, code) {
   if (code && FINAL_ERROR_CODES.has(code)) return false;
   return status === 408 || status === 409 || status === 429 || status >= 500;
 }
-function outcomeFromChatResponse(customId, profile, status, json) {
+function reasonFromErrorBody(json, rawText) {
+  const error = json.error;
+  if (error && typeof error === "object" && typeof error.message === "string" && error.message !== "") return error.message;
+  if (typeof error === "string" && error !== "") return error;
+  if (typeof json.message === "string" && json.message !== "") return json.message;
+  if (typeof json.detail === "string" && json.detail !== "") return json.detail;
+  const trimmed = rawText.trim();
+  return trimmed !== "" ? trimmed : "request failed";
+}
+function expectedKeyOf(params) {
+  const required = schemaOf(params).required;
+  const first = Array.isArray(required) ? required[0] : void 0;
+  return typeof first === "string" ? first : void 0;
+}
+function scrubEndpointMessage(text, baseUrl) {
+  return scrubBaseUrlParts(scrubUrls(text), baseUrl);
+}
+function outcomeFromChatResponse(customId, profile, params, status, json, rawText) {
   if (status !== 200) {
-    const message = json.error?.message ?? "request failed";
-    const code = json.error?.code ?? void 0;
-    return { customId, kind: "error", message: `${profile.label}: ${status} ${message}`.slice(0, 300), retryable: isRetryableStatus(status, code) };
+    const code = (json.error && typeof json.error === "object" ? json.error.code : void 0) ?? void 0;
+    const reason = scrubEndpointMessage(reasonFromErrorBody(json, rawText), profile.baseUrl);
+    const message = redactSecrets(`${profile.label}: ${status} ${reason}`).slice(0, 200);
+    return { customId, kind: "error", message, retryable: isRetryableStatus(status, code) };
   }
   const choice = json.choices?.[0];
   if (choice?.finish_reason === "content_filter" || choice?.message?.refusal) return { customId, kind: "refusal" };
   if (choice?.finish_reason === "length") return { customId, kind: "error", message: "max_tokens", retryable: true };
-  const text = typeof choice?.message?.content === "string" ? choice.message.content : "";
-  const usage = json.usage ?? {};
-  const reasoning = profile.reasoningAddsToOutput ? usage.completion_tokens_details?.reasoning_tokens ?? 0 : 0;
-  return { customId, kind: "ok", text, inputTokens: usage.prompt_tokens ?? 0, outputTokens: (usage.completion_tokens ?? 0) + reasoning };
+  const content = typeof choice?.message?.content === "string" ? choice.message.content : "";
+  const text = profile.tolerantJson ? extractJsonObject(content, expectedKeyOf(params)) ?? content : content;
+  const usage = json.usage;
+  const reasoning = profile.reasoningAddsToOutput ? usage?.completion_tokens_details?.reasoning_tokens ?? 0 : 0;
+  const inputTokens = usage?.prompt_tokens ?? approxInputTokens(params);
+  const outputTokens = (usage?.completion_tokens ?? approxOutputTokens(content)) + reasoning;
+  return { customId, kind: "ok", text, inputTokens, outputTokens };
 }
+var Semaphore = class {
+  available;
+  queue = [];
+  constructor(slots) {
+    this.available = slots;
+  }
+  async acquire() {
+    if (this.available > 0) {
+      this.available--;
+      return;
+    }
+    await new Promise((resolve4) => this.queue.push(resolve4));
+  }
+  release() {
+    const next = this.queue.shift();
+    if (next) next();
+    else this.available++;
+  }
+};
 var OpenAiCompatibleLlmClient = class {
   // No free token-count endpoint (llmShared.ts's approxInputTokens doc comment); every count is a guess.
   countsAreApproximate = true;
   profile;
   fetchImpl;
   apiKey;
+  // Custom endpoints only (M-3): caps this instance's total in-flight requests at Max Parallel Requests, across
+  // every job. Built-in providers have no such cap -- a job's own `concurrency` is enough for them.
+  semaphore;
   constructor(options) {
-    this.profile = OPENAI_COMPATIBLE_PROFILES[options.provider];
+    this.profile = options.provider === "custom" ? customProfileOf(options.custom) : OPENAI_COMPATIBLE_PROFILES[options.provider];
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.apiKey = options.apiKey;
+    this.semaphore = options.provider === "custom" ? new Semaphore(options.custom.maxParallel) : void 0;
   }
-  async runSync(requests, concurrency, onOutcome) {
-    return runPool(requests, concurrency, (request) => this.runOne(request), onOutcome);
+  async runSync(requests, concurrency, onOutcome, shouldContinue) {
+    return runPool(requests, concurrency, (request) => this.runOne(request), onOutcome, shouldContinue);
   }
   async runBatch(_requests, _pollMs) {
     throw new Error(BATCH_UNAVAILABLE_MESSAGE);
@@ -1889,36 +2482,58 @@ var OpenAiCompatibleLlmClient = class {
   }
   async runOne(request) {
     const { profile } = this;
-    if (!this.apiKey) return { customId: request.customId, kind: "error", message: `${profile.label}: ${MISSING_KEY_MESSAGE}`, retryable: false };
-    const result = await fetchWithRetry(
-      `${profile.baseUrl}/chat/completions`,
-      () => ({
-        method: "POST",
-        headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" },
-        body: JSON.stringify(buildChatBody(profile, request.params)),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
-      }),
-      {
-        fetchImpl: this.fetchImpl,
-        // FINAL_ERROR_CODES rides a 429 (an exhausted balance) but never succeeds on retry.
-        isFinal: (status, body) => status === 429 && FINAL_ERROR_CODES.has(body.error?.code ?? "")
+    if (profile.keyRequired && !this.apiKey) return { customId: request.customId, kind: "error", message: `${profile.label}: ${MISSING_KEY_MESSAGE}`, retryable: false };
+    await this.semaphore?.acquire();
+    try {
+      const result = await fetchWithRetry(
+        endpointUrl(profile.baseUrl, "/chat/completions"),
+        () => ({
+          method: "POST",
+          headers: { ...authHeaders(profile.keyHeader, this.apiKey), "content-type": "application/json" },
+          body: JSON.stringify(buildChatBody(profile, request.params)),
+          // M-10/amendment 5: a cross-origin redirect would forward every header but Authorization (api-key
+          // included), so a redirect is refused outright instead of followed.
+          redirect: "error",
+          signal: AbortSignal.timeout(profile.requestTimeoutMs)
+        }),
+        {
+          fetchImpl: this.fetchImpl,
+          // FINAL_ERROR_CODES rides a 429 (an exhausted balance) but never succeeds on retry.
+          isFinal: (status, body) => {
+            const error = body.error;
+            const code = error && typeof error === "object" ? error.code ?? "" : "";
+            return status === 429 && FINAL_ERROR_CODES.has(code);
+          },
+          retryTimeouts: profile.retryTimeouts,
+          // NB-6: the server answers the same redirect every time, so a refused one is final at the fetch level too.
+          isFinalNetworkError: isRedirectError
+        }
+      );
+      if ("networkError" in result) {
+        const { networkError } = result;
+        const timedOut = isFetchTimeout(networkError);
+        const redirected = !timedOut && isRedirectError(networkError);
+        const message = timedOut ? timeoutMessage(timedOutAfterMs(networkError, profile.requestTimeoutMs)) : redirected ? REDIRECT_MESSAGE : scrubEndpointMessage(`cannot reach ${reduceBaseUrl(profile.baseUrl)} (${networkErrorCode(networkError)})`, profile.baseUrl);
+        return {
+          customId: request.customId,
+          kind: "error",
+          message: `${profile.label}: ${message}`,
+          retryable: !redirected
+        };
       }
-    );
-    if ("networkError" in result) {
-      const { networkError } = result;
-      const timedOut = networkError instanceof Error && (networkError.name === "TimeoutError" || networkError.name === "AbortError");
-      const message = timedOut ? "the request timed out after 10 minutes" : networkError instanceof Error ? networkError.message : String(networkError);
-      return { customId: request.customId, kind: "error", message: `${profile.label}: ${message}`, retryable: true };
+      return outcomeFromChatResponse(request.customId, profile, request.params, result.status, result.json, result.text);
+    } finally {
+      this.semaphore?.release();
     }
-    return outcomeFromChatResponse(request.customId, profile, result.status, result.json);
   }
 };
 
 // src/providers.ts
-var AI_PROVIDERS = ["anthropic", "openai", "xai", "deepseek", "gemini"];
+var AI_PROVIDERS = ["anthropic", "openai", "xai", "deepseek", "gemini", "custom"];
+var NO_KEY_NEEDED_DETAIL = "No API key (not required for a custom endpoint)";
 function keyIdOf(apiKey) {
   if (!apiKey) return "";
-  return createHash4("sha1").update(apiKey, "utf8").digest("hex").slice(0, 12);
+  return createHash5("sha1").update(apiKey, "utf8").digest("hex").slice(0, 12);
 }
 function supportsBatch(config) {
   return config.provider === "anthropic" && config.auth === "api";
@@ -1926,8 +2541,9 @@ function supportsBatch(config) {
 function billingOf(config) {
   return config.auth;
 }
-function apiKeyHealth(env) {
-  return env.LOCHUB_API_KEY ? { ready: true, detail: "API key is set" } : { ready: false, detail: MISSING_KEY_MESSAGE };
+function apiKeyHealth(env, provider = "anthropic") {
+  if (env.LOCHUB_API_KEY) return { ready: true, detail: "API key is set" };
+  return provider === "custom" ? { ready: true, detail: NO_KEY_NEEDED_DETAIL } : { ready: false, detail: MISSING_KEY_MESSAGE };
 }
 function createLlmClient(config, projectDir, apiKey) {
   switch (config.provider) {
@@ -1939,6 +2555,9 @@ function createLlmClient(config, projectDir, apiKey) {
     case "xai":
     case "deepseek":
       return new OpenAiCompatibleLlmClient({ provider: config.provider, apiKey });
+    case "custom":
+      if (!config.custom) throw new Error("The custom provider needs its endpoint settings (--base-url and the other custom flags).");
+      return new OpenAiCompatibleLlmClient({ provider: "custom", custom: config.custom, apiKey });
     default: {
       const exhaustive = config.provider;
       throw new Error(`Unknown AI provider: ${exhaustive}`);
@@ -1958,12 +2577,20 @@ function jobDefaultsFor(ai) {
     judgeModel: ai.judgeModel,
     // Now (sync) is the default for every provider; Batch is an explicit choice, and only Anthropic
     // billed per token supports it.
-    mode: "sync"
+    mode: "sync",
+    // M-3/amendment 4: a Custom endpoint is often one local GPU. The real cap on concurrent requests is now the
+    // semaphore inside OpenAiCompatibleLlmClient, shared across every job; this concurrency is just this one
+    // job's own worker count, so every configured value (1-32) takes effect instead of being silently capped at
+    // DEFAULT_JOB_OPTIONS.concurrency (8).
+    ...ai.custom ? {
+      concurrency: ai.custom.maxParallel,
+      customPrice: { input: ai.custom.priceIn, output: ai.custom.priceOut }
+    } : {}
   };
 }
 
 // src/server.ts
-import { createHash as createHash5, randomUUID as randomUUID2 } from "node:crypto";
+import { createHash as createHash7, randomUUID as randomUUID2 } from "node:crypto";
 import { Fastify } from "../../Source/ThirdParty/LocHubNodeDeps/lochub_node_deps.mjs";
 
 // src/estimate.ts
@@ -1996,8 +2623,8 @@ var BudgetExceededError = class extends Error {
     this.name = "BudgetExceededError";
   }
 };
-function priceOf(model) {
-  return PRICES_PER_MTOK[model] ?? null;
+function priceOf(model, customPrice) {
+  return customPrice ?? PRICES_PER_MTOK[model] ?? null;
 }
 var ESTIMATE_CONCURRENCY = 8;
 var MAX_COUNT_CACHE_ENTRIES = 5e4;
@@ -2019,8 +2646,9 @@ function isRateLimitOrOverloaded(error) {
   return status === 429 || status === 529 || type === "rate_limit_error" || type === "overloaded_error";
 }
 async function estimateJob(store, llm, cache, opts, billing = "api", extra = {}) {
-  const translatePrice = priceOf(opts.translateModel);
-  const judgePrice = priceOf(opts.judgeModel);
+  const translatePrice = priceOf(opts.translateModel, opts.customPrice);
+  const judgePrice = priceOf(opts.judgeModel, opts.customPrice);
+  const pricesUnset = opts.customPrice !== void 0 && opts.customPrice.input === 0 && opts.customPrice.output === 0;
   const plan = planWork(store, opts);
   let strings = plan.tmHits.length;
   const toCount = [];
@@ -2105,12 +2733,175 @@ async function estimateJob(store, llm, cache, opts, billing = "api", extra = {})
     outputTokens: translateOut + judgeOut,
     usd,
     billing,
-    ...approximate ? { approximate: true } : {}
+    ...approximate ? { approximate: true } : {},
+    ...pricesUnset ? { pricesUnset: true } : {}
   };
 }
 function assertWithinBudget(estimate, maxUsd) {
   if (estimate.usd !== null && estimate.usd > maxUsd)
     throw new BudgetExceededError(`Estimated $${estimate.usd.toFixed(2)} exceeds the limit of $${maxUsd.toFixed(2)}`);
+}
+
+// src/exchange.ts
+import { createHash as createHash6 } from "node:crypto";
+var ImportRequestError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ImportRequestError";
+  }
+};
+var ImportPreviewStaleError = class extends Error {
+  constructor(result) {
+    super("LocHub changed since the preview. Check the new preview and import again.");
+    this.result = result;
+    this.name = "ImportPreviewStaleError";
+  }
+};
+var MAX_ACTOR_LENGTH = 64;
+var ISO_DATE_TIME = EXPORTED_AT_PATTERN;
+var UNCHANGING_ACTIONS = /* @__PURE__ */ new Set(["exported", "ai_suggestion"]);
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function optionalString(entry, field, index) {
+  const value = entry[field];
+  if (value === void 0) return void 0;
+  if (typeof value !== "string") throw new ImportRequestError(`entries[${index}].${field} must be a string`);
+  return value;
+}
+function parseEntry(raw, index) {
+  if (!isRecord(raw)) throw new ImportRequestError(`entries[${index}] must be an object`);
+  if (typeof raw.text !== "string") throw new ImportRequestError(`entries[${index}].text must be a string`);
+  if (typeof raw.approved !== "boolean") throw new ImportRequestError(`entries[${index}].approved must be true or false`);
+  const entry = { text: raw.text, approved: raw.approved };
+  for (const field of ["unitId", "namespace", "key", "source"]) {
+    const value = optionalString(raw, field, index);
+    if (value !== void 0) entry[field] = value;
+  }
+  if (raw.exportedRevision !== void 0) {
+    const revision = raw.exportedRevision;
+    if (typeof revision !== "number" || !Number.isInteger(revision) || revision < 0)
+      throw new ImportRequestError(`entries[${index}].exportedRevision must be a whole number`);
+    entry.exportedRevision = revision;
+  }
+  const exportedAt = optionalString(raw, "exportedAt", index);
+  if (exportedAt !== void 0) {
+    const match = ISO_DATE_TIME.exec(exportedAt);
+    const time = match ? Date.parse(match[1] ? exportedAt : `${exportedAt}Z`) : Number.NaN;
+    if (Number.isNaN(time)) throw new ImportRequestError(`entries[${index}].exportedAt must be a date (ISO 8601)`);
+    entry.exportedAt = new Date(time).toISOString();
+  }
+  return entry;
+}
+function parseImportRequest(body) {
+  if (!isRecord(body)) throw new ImportRequestError("Body must be a JSON object");
+  if (typeof body.culture !== "string") throw new ImportRequestError("culture is required");
+  if (typeof body.actor !== "string") throw new ImportRequestError("actor must be a string");
+  const { dryRun, overwriteConflicts, acceptConfirm } = body;
+  if (typeof dryRun !== "boolean") throw new ImportRequestError("dryRun must be true or false");
+  if (typeof overwriteConflicts !== "boolean") throw new ImportRequestError("overwriteConflicts must be true or false");
+  if (typeof acceptConfirm !== "boolean") throw new ImportRequestError("acceptConfirm must be true or false");
+  const actor = Array.from(body.actor.trim()).slice(0, MAX_ACTOR_LENGTH).join("");
+  if (!dryRun && actor.length === 0) throw new ImportRequestError("actor is required: the reviewer name recorded on every imported string");
+  if (body.previewDigest !== void 0 && typeof body.previewDigest !== "string") throw new ImportRequestError("previewDigest must be a string");
+  if (!Array.isArray(body.entries)) throw new ImportRequestError("entries must be an array");
+  const entries = body.entries.map((raw, index) => parseEntry(raw, index));
+  return { culture: body.culture, actor, dryRun, overwriteConflicts, acceptConfirm, previewDigest: body.previewDigest, entries };
+}
+function resolveUnits(store, entries) {
+  const byName = /* @__PURE__ */ new Map();
+  for (const unit of store.units.values()) if (unit.state === "active") byName.set(JSON.stringify([unit.namespace, unit.key]), unit);
+  const seen = /* @__PURE__ */ new Set();
+  return entries.map((entry) => {
+    let unit;
+    if (entry.unitId !== void 0) {
+      const found = store.units.get(entry.unitId);
+      unit = found?.state === "active" ? found : void 0;
+    }
+    if (!unit && entry.key !== void 0) unit = byName.get(JSON.stringify([entry.namespace ?? "", entry.key]));
+    if (unit) {
+      if (seen.has(unit.id)) throw new ImportRequestError(`The file has the same string twice (${unit.namespace}/${unit.key}); keep one and import again.`);
+      seen.add(unit.id);
+    }
+    return unit;
+  });
+}
+function runImport(store, request, check) {
+  const units = resolveUnits(store, request.entries);
+  let lastChange;
+  const changedAfter = (unitId, exportedAt) => {
+    lastChange ??= store.latestEventTimes(request.culture, UNCHANGING_ACTIONS);
+    return (lastChange.get(unitId) ?? Number.NEGATIVE_INFINITY) > Date.parse(exportedAt);
+  };
+  const rows = [];
+  const applied = [];
+  request.entries.forEach((entry, index) => {
+    const unit = units[index];
+    if (!unit) {
+      rows.push({ index, outcome: "unknown" });
+      return;
+    }
+    if (entry.source !== void 0 && entry.source !== unit.source) {
+      rows.push({ index, unitId: unit.id, outcome: "stale" });
+      return;
+    }
+    if (entry.text.trim().length === 0) {
+      rows.push({ index, unitId: unit.id, outcome: "empty" });
+      return;
+    }
+    const cell = store.getCell(request.culture, unit.id);
+    const approves = entry.approved && (cell.status !== "approved" || entry.source !== void 0 && isOutdated(unit, cell));
+    if (entry.text === cell.text && !approves) {
+      rows.push({ index, unitId: unit.id, outcome: "unchanged" });
+      return;
+    }
+    const conflict = entry.exportedRevision !== void 0 ? entry.exportedRevision !== cell.revision : entry.exportedAt !== void 0 && changedAfter(unit.id, entry.exportedAt);
+    const issues = check(unit, entry.text);
+    const accepted = confirmCodes(issues);
+    let outcome;
+    if (conflict && !request.overwriteConflicts) outcome = "conflict";
+    else if (hasHardIssues(issues)) outcome = "hard";
+    else if (accepted.length > 0 && !request.acceptConfirm) outcome = "confirm";
+    else {
+      const carriedOverApproval = cell.status === "approved";
+      const kind = conflict ? "changed" : entry.text === cell.text ? "approved" : entry.approved && !carriedOverApproval ? "changed_approved" : "changed";
+      applied.push({ unit, cell, entry, outcome: kind, accepted });
+      outcome = kind;
+    }
+    rows.push({ index, unitId: unit.id, outcome, ...conflict ? { conflict: true } : {}, issues, before: cell.text, after: entry.text });
+  });
+  const counts = Object.fromEntries(IMPORT_OUTCOMES.map((outcome) => [outcome, 0]));
+  for (const row of rows) counts[row.outcome]++;
+  const digest = createHash6("sha256").update(JSON.stringify(rows)).digest("hex").slice(0, 16);
+  const result = { rows, counts, digest };
+  if (!request.dryRun && request.previewDigest !== void 0 && request.previewDigest !== digest) throw new ImportPreviewStaleError(result);
+  if (!request.dryRun && applied.length > 0) apply(store, request, applied);
+  return result;
+}
+function apply(store, request, applied) {
+  const ts = (/* @__PURE__ */ new Date()).toISOString();
+  const events = [];
+  for (const { unit, cell, entry, outcome, accepted } of applied) {
+    const next = outcome === "approved" ? approvedCell(unit, cell) : { ...editedCell(unit, cell, entry.text, request.actor), ...outcome === "changed_approved" ? { status: "approved" } : {} };
+    store.putCell(next);
+    events.push({
+      ts,
+      unitId: unit.id,
+      culture: request.culture,
+      action: "import",
+      actor: request.actor,
+      before: cell.text,
+      after: next.text,
+      ...accepted.length > 0 ? { accepted: [...accepted] } : {}
+    });
+  }
+  try {
+    store.save();
+  } catch (error) {
+    for (const { cell } of applied) store.putCell(cell);
+    throw error;
+  }
+  store.appendEvents(events);
 }
 
 // src/push.ts
@@ -2225,13 +3016,13 @@ async function retranslateWithNote(store, llm, opts, unitId, note, asRule) {
   const group = { groupKey: unit.groupKey, items: [{ unit, cell: { ...current, status: "rejected", note: text } }] };
   const params = translateParamsFor(store, cultureContext(store, culture, opts.brief), group, opts);
   const [outcome] = await llm.runSync([{ customId: requestId(params), params }], 1);
-  if (!outcome || outcome.kind === "refusal" || outcome.kind === "error") {
+  if (!outcome || outcome.kind !== "ok") {
     const message = outcome?.kind === "refusal" ? "The model refused this string" : outcome?.kind === "error" ? `The model call failed: ${redactSecrets(outcome.message)}` : "The model call failed";
     throw new CellActionError(message, 502);
   }
   const item = parseTranslatedItems(outcome.text, group).items.get(unitId);
   if (!item) throw new CellActionError("The model returned no translation for this string", 502);
-  const issues = checkTranslation(store, culture, unit, item.translation);
+  const issues = checkTranslation(store, culture, unit, item.translation, opts.lengthCheck);
   store.assertFresh();
   const latest = store.getCell(culture, unitId);
   const cell = { ...latest, suggestion: item.translation };
@@ -2427,6 +3218,35 @@ var LocHubStore = class _LocHubStore {
   readEvents(culture, unitId) {
     return readJsonl(this.pathFor(`events.${culture}.jsonl`)).filter((e) => e.unitId === unitId);
   }
+  // Several events in one write per culture file (an import applies many rows at once).
+  appendEvents(events) {
+    const byCulture = /* @__PURE__ */ new Map();
+    for (const event of events) byCulture.set(event.culture, (byCulture.get(event.culture) ?? "") + canonicalJson(event) + "\n");
+    for (const [culture, lines] of byCulture) appendFileSync(this.pathFor(`events.${culture}.jsonl`), lines, "utf8");
+  }
+  // The newest event time (ms since epoch) per unit of one culture, skipping the `ignore` actions: import uses it to
+  // tell whether a cell changed after a translator's file was exported. Tolerant of a torn last line and of a bad
+  // timestamp, like afterTextsByUnit below.
+  latestEventTimes(culture, ignore) {
+    const out = /* @__PURE__ */ new Map();
+    const path = this.pathFor(`events.${culture}.jsonl`);
+    if (!existsSync3(path)) return out;
+    for (const line of readFileSync3(path, "utf8").split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) continue;
+      let event;
+      try {
+        event = JSON.parse(trimmed);
+      } catch {
+        continue;
+      }
+      if (ignore.has(event.action)) continue;
+      const time = Date.parse(event.ts);
+      if (Number.isNaN(time)) continue;
+      if (time > (out.get(event.unitId) ?? Number.NEGATIVE_INFINITY)) out.set(event.unitId, time);
+    }
+    return out;
+  }
   // Every text LocHub itself has ever produced for a cell of this culture, keyed by unit id: Push uses
   // this to tell a stale export (a text LocHub already produced, now reappearing from the archive) from a
   // genuine human edit. Reads the whole events file once per call instead of once per archive entry.
@@ -2606,15 +3426,15 @@ function* cultureKeysOf(store, extra) {
   yield* store.style.keys();
   yield* extra;
 }
-function isRecord(value) {
+function isRecord2(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function isStringMap(value) {
-  return isRecord(value) && Object.values(value).every((v) => typeof v === "string");
+  return isRecord2(value) && Object.values(value).every((v) => typeof v === "string");
 }
 var ENTRY_STRING_FIELDS = ["namespace", "key", "source", "origin", "devNotes", "groupKey"];
 function validateSnapshot(body) {
-  if (!isRecord(body)) return "Snapshot must be an object";
+  if (!isRecord2(body)) return "Snapshot must be an object";
   if (!Array.isArray(body.entries)) return "entries must be an array";
   for (let i = 0; i < body.entries.length; i++) {
     const error = validateEntry(body.entries[i], i);
@@ -2635,14 +3455,14 @@ function validateSnapshot(body) {
   return null;
 }
 function validatePluralForms(pluralForms) {
-  if (!isRecord(pluralForms)) return "pluralForms must be an object";
+  if (!isRecord2(pluralForms)) return "pluralForms must be an object";
   const seen = /* @__PURE__ */ new Map();
   for (const [culture, forms] of Object.entries(pluralForms)) {
     if (!CULTURE_RE.test(culture)) return `pluralForms key "${culture}" is not a valid culture`;
     const existing = seen.get(culture.toLowerCase());
     if (existing !== void 0) return `pluralForms keys "${existing}" and "${culture}" differ only in case`;
     seen.set(culture.toLowerCase(), culture);
-    if (!isRecord(forms)) return `pluralForms.${culture} must be an object`;
+    if (!isRecord2(forms)) return `pluralForms.${culture} must be an object`;
     for (const type of ["cardinal", "ordinal"]) {
       const list = forms[type];
       const valid = Array.isArray(list) && list.length > 0 && list.every((c) => typeof c === "string" && PLURAL_CATEGORIES.has(c));
@@ -2652,7 +3472,7 @@ function validatePluralForms(pluralForms) {
   return null;
 }
 function validateEntry(entry, index) {
-  if (!isRecord(entry)) return `entries[${index}] must be an object`;
+  if (!isRecord2(entry)) return `entries[${index}] must be an object`;
   for (const field of ENTRY_STRING_FIELDS) {
     if (typeof entry[field] !== "string") return `entries[${index}].${field} must be a string`;
   }
@@ -2660,7 +3480,7 @@ function validateEntry(entry, index) {
   return null;
 }
 function validateArchives(archives) {
-  if (!isRecord(archives)) return "archives must be an object";
+  if (!isRecord2(archives)) return "archives must be an object";
   const seen = /* @__PURE__ */ new Map();
   for (const [culture, list] of Object.entries(archives)) {
     if (!CULTURE_RE.test(culture)) return `archives key "${culture}" is not a valid culture`;
@@ -2677,7 +3497,7 @@ function validateArchives(archives) {
   return null;
 }
 function validateArchiveEntry(entry, culture, index) {
-  if (!isRecord(entry)) return `archives.${culture}[${index}] must be an object`;
+  if (!isRecord2(entry)) return `archives.${culture}[${index}] must be an object`;
   for (const field of ["namespace", "key", "translation", "source"]) {
     if (typeof entry[field] !== "string") return `archives.${culture}[${index}].${field} must be a string`;
   }
@@ -2688,7 +3508,7 @@ function validateCoverage(coverage) {
   if (!Array.isArray(coverage)) return "coverage must be an array";
   for (let i = 0; i < coverage.length; i++) {
     const finding = coverage[i];
-    if (!isRecord(finding)) return `coverage[${i}] must be an object`;
+    if (!isRecord2(finding)) return `coverage[${i}] must be an object`;
     for (const field of COVERAGE_STRING_FIELDS) {
       if (typeof finding[field] !== "string") return `coverage[${i}].${field} must be a string`;
     }
@@ -2697,17 +3517,17 @@ function validateCoverage(coverage) {
   return null;
 }
 function validateReconcileBody(body) {
-  if (!isRecord(body)) return "Body must be an object";
+  if (!isRecord2(body)) return "Body must be an object";
   return validateArchives(body.archives);
 }
 function validateExpected(body) {
-  if (!isRecord(body)) return null;
+  if (!isRecord2(body)) return null;
   if (body.expectedRevision !== void 0 && typeof body.expectedRevision !== "number") return "expectedRevision must be a number";
   if (body.expectedSourceRev !== void 0 && typeof body.expectedSourceRev !== "number") return "expectedSourceRev must be a number";
   return null;
 }
 function validateAccept(body) {
-  if (!isRecord(body) || body.accept === void 0) return null;
+  if (!isRecord2(body) || body.accept === void 0) return null;
   if (!Array.isArray(body.accept) || !body.accept.every((code) => typeof code === "string")) return "accept must be an array of strings";
   return null;
 }
@@ -2718,18 +3538,18 @@ function validateJobScope(body) {
   return null;
 }
 function validateAck(body) {
-  if (!isRecord(body)) return "Ack must be an object";
+  if (!isRecord2(body)) return "Ack must be an object";
   if (typeof body.culture !== "string") return "culture must be a string";
   if (!Array.isArray(body.written)) return "written must be an array";
   if (!Array.isArray(body.rejected)) return "rejected must be an array";
   for (let i = 0; i < body.written.length; i++) {
     const row = body.written[i];
-    if (!isRecord(row) || typeof row.unitId !== "string" || typeof row.translation !== "string")
+    if (!isRecord2(row) || typeof row.unitId !== "string" || typeof row.translation !== "string")
       return `written[${i}] must have string unitId and translation`;
   }
   for (let i = 0; i < body.rejected.length; i++) {
     const row = body.rejected[i];
-    if (!isRecord(row) || typeof row.unitId !== "string" || typeof row.translation !== "string")
+    if (!isRecord2(row) || typeof row.unitId !== "string" || typeof row.translation !== "string")
       return `rejected[${i}] must have string unitId and translation`;
     if (!Array.isArray(row.errors) || !row.errors.every((e) => typeof e === "string")) return `rejected[${i}].errors must be a string array`;
   }
@@ -2773,8 +3593,14 @@ function buildServer(deps) {
   const ai = deps.ai ?? DEFAULT_AI_CONFIG;
   const env = deps.env ?? process.env;
   const jobDefaults = deps.jobDefaults ?? jobDefaultsFor(ai);
-  const briefSha1 = deps.briefSha1 ?? createHash5("sha1").update("").digest("hex");
+  const briefSha1 = deps.briefSha1 ?? createHash7("sha1").update("").digest("hex");
   const subscriptionHealthPromise = ai.auth === "subscription" ? (deps.authProbe ?? (() => checkClaudeAuthStatus()))() : void 0;
+  let endpointHealth = ai.custom ? { url: reduceBaseUrl(ai.custom.baseUrl), status: "checking" } : void 0;
+  if (ai.custom) {
+    void probeEndpoint(ai.custom, [ai.translateModel, ai.judgeModel], env.LOCHUB_API_KEY, deps.endpointFetch).then((probed) => {
+      endpointHealth = probed;
+    });
+  }
   function cultureGuard(culture, reply) {
     const inFlight = [...starting, ...[...jobs.values()].filter((j) => j.status === "running").map((j) => j.culture)];
     const error = checkCulture(store, culture, inFlight);
@@ -2797,13 +3623,23 @@ function buildServer(deps) {
   });
   let coverage = { pushedAt: "", findings: [] };
   let lastPush = { nativeCulture: "", cultures: [] };
+  function translationCultures() {
+    const cultures = new Set(lastPush.cultures);
+    for (const [culture, cells] of store.cells) if (cells.size > 0) cultures.add(culture);
+    cultures.delete(lastPush.nativeCulture);
+    return cultures;
+  }
   app.get("/api/health", async () => {
+    const { custom, ...aiPublic } = ai;
     const aiHealth = {
-      ...ai,
+      ...aiPublic,
       batch: supportsBatch(ai),
       briefSha1,
       keyId: keyIdOf(env.LOCHUB_API_KEY),
-      ...subscriptionHealthPromise ? await subscriptionHealthPromise : apiKeyHealth(env)
+      lengthArgs: lengthArgsOf(jobDefaults.lengthCheck),
+      ...custom ? { customSettingsId: custom.settingsId } : {},
+      ...endpointHealth ? { endpoint: endpointHealth } : {},
+      ...subscriptionHealthPromise ? await subscriptionHealthPromise : apiKeyHealth(env, ai.provider)
     };
     return {
       ok: true,
@@ -2864,7 +3700,8 @@ function buildServer(deps) {
     );
     const limit = intParam(q.limit, 200, 1, 1e3);
     const offset = intParam(q.offset, 0, 0, Number.MAX_SAFE_INTEGER);
-    return { total: rows.length, rows: rows.slice(offset, offset + limit) };
+    const page = rows.slice(offset, offset + limit).map((row) => ({ ...row, lengthLimit: lengthLimitFor(row.unit, culture, jobDefaults.lengthCheck) }));
+    return { total: rows.length, rows: page };
   });
   app.post("/api/cells/:culture/:unitId/:action", async (request, reply) => {
     store.assertFresh();
@@ -2878,10 +3715,10 @@ function buildServer(deps) {
     const actor = typeof body.actor === "string" ? body.actor : "reviewer";
     try {
       let cell;
-      if (action === "approve") cell = approveCell(store, culture, unitId, actor, expected, accept);
+      if (action === "approve") cell = approveCell(store, culture, unitId, actor, expected, accept, jobDefaults.lengthCheck);
       else if (action === "edit") {
         if (typeof body.text !== "string") return reply.code(400).send({ error: "text is required" });
-        cell = editCell(store, culture, unitId, body.text, actor, expected, accept);
+        cell = editCell(store, culture, unitId, body.text, actor, expected, accept, jobDefaults.lengthCheck);
       } else if (action === "reject") cell = rejectCell(store, culture, unitId, typeof body.note === "string" ? body.note : "", actor, expected);
       else return reply.code(404).send({ error: `Unknown action ${action}` });
       store.save();
@@ -2912,7 +3749,7 @@ function buildServer(deps) {
     if (scopeError) return reply.code(400).send({ error: scopeError });
     if (opts.mode === "batch" && !supportsBatch(ai)) return reply.code(400).send({ error: "batch_unavailable", message: BATCH_UNAVAILABLE_MESSAGE });
     if (ai.auth === "api") {
-      const health = apiKeyHealth(env);
+      const health = apiKeyHealth(env, ai.provider);
       if (!health.ready) return reply.code(400).send({ error: "ai_not_ready", message: health.detail });
     }
     const skipEstimate = body.skipEstimate === true;
@@ -3018,7 +3855,7 @@ function buildServer(deps) {
     if (scopeError) return reply.code(400).send({ error: scopeError });
     if (opts.mode === "batch" && !supportsBatch(ai)) return reply.code(400).send({ error: "batch_unavailable", message: BATCH_UNAVAILABLE_MESSAGE });
     if (ai.auth === "api") {
-      const health = apiKeyHealth(env);
+      const health = apiKeyHealth(env, ai.provider);
       if (!health.ready) return reply.code(400).send({ error: "ai_not_ready", message: health.detail });
     }
     if (!cultureGuard(opts.culture, reply)) return;
@@ -3028,7 +3865,7 @@ function buildServer(deps) {
     const { culture, unitId } = request.params;
     if (!cultureGuard(culture, reply)) return;
     if (ai.auth === "api") {
-      const health = apiKeyHealth(env);
+      const health = apiKeyHealth(env, ai.provider);
       if (!health.ready) return reply.code(400).send({ error: "ai_not_ready", message: health.detail });
     }
     const body = request.body ?? {};
@@ -3051,9 +3888,23 @@ function buildServer(deps) {
     const body = request.body ?? {};
     if (typeof body.text !== "string") return reply.code(400).send({ error: "text is required" });
     try {
-      return { issues: checkCell(store, culture, unitId, body.text) };
+      return { issues: checkCell(store, culture, unitId, body.text, jobDefaults.lengthCheck) };
     } catch (error) {
       return sendCellError(reply, error);
+    }
+  });
+  app.post("/api/import", async (request, reply) => {
+    try {
+      const body = parseImportRequest(request.body);
+      if (!cultureGuard(body.culture, reply)) return;
+      if (!translationCultures().has(body.culture)) return reply.code(400).send({ error: `${body.culture} is not a translation culture of this project` });
+      if (!body.dryRun) store.assertFresh();
+      const check = (unit, text) => checkCell(store, body.culture, unit.id, text, jobDefaults.lengthCheck);
+      return runImport(store, body, check);
+    } catch (error) {
+      if (error instanceof ImportRequestError) return reply.code(400).send({ error: error.message });
+      if (error instanceof ImportPreviewStaleError) return reply.code(409).send({ error: "preview_stale", message: error.message, result: error.result });
+      throw error;
     }
   });
   app.get("/api/style/:culture", async (request, reply) => {
@@ -3112,10 +3963,7 @@ function buildServer(deps) {
     return summarize(store, culture);
   });
   app.get("/api/meta", async () => {
-    const cultures = new Set(lastPush.cultures);
-    for (const [culture, cells] of store.cells) if (cells.size > 0) cultures.add(culture);
-    cultures.delete(lastPush.nativeCulture);
-    const usable = [...cultures].filter((culture) => checkCulture(store, culture) === null);
+    const usable = [...translationCultures()].filter((culture) => checkCulture(store, culture) === null);
     return { nativeCulture: lastPush.nativeCulture, cultures: usable.sort(compareCodeUnits) };
   });
   app.post("/api/inbox", async (request, reply) => {
@@ -3135,16 +3983,55 @@ function buildServer(deps) {
 }
 
 // src/cli.ts
-var USAGE = "Usage: node <plugin>/Resources/LocHubService/lochub_service.mjs serve --project <ProjectDir> [--port 47810] [--policy validated|approved_only] [--provider anthropic|openai|xai|deepseek|gemini] [--auth api|subscription] [--translate-model <id>] [--judge-model <id>] [--web-dir <dir>] [--web-deps-dir <dir>] [--brief-file <path>]";
+var USAGE = "Usage: node <plugin>/Resources/LocHubService/lochub_service.mjs serve --project <ProjectDir> [--port 47810] [--policy validated|approved_only] [--provider anthropic|openai|xai|deepseek|gemini|custom] [--auth api|subscription] [--translate-model <id>] [--judge-model <id>] [--web-dir <dir>] [--web-deps-dir <dir>] [--brief-file <path>] [--base-url <url> | env LOCHUB_CUSTOM_BASE_URL] [--key-header bearer|api-key] [--structured-output json_schema|json_object|prompt_only] [--price-in <usd>] [--price-out <usd>] [--max-parallel <1-32>] [--request-timeout <30-300>] [--length-check off|warning|confirm] [--length-scope ui|all] [--length-ratio <1-5>] [--length-extra <0-100>] [--length-ratios <culture>=<ratio>,...] [--length-hint on|off]";
 function readBriefFile(path) {
   const bytes = path && existsSync5(path) ? readFileSync5(path) : Buffer.alloc(0);
-  const sha1 = createHash6("sha1").update(bytes).digest("hex");
+  const sha1 = createHash8("sha1").update(bytes).digest("hex");
   return { text: stripBom(bytes.toString("utf8")), sha1 };
 }
 function resolveApiKey(env) {
   return env.LOCHUB_API_KEY || void 0;
 }
-function parseCliArgs(argv) {
+function resolveCustomBaseUrl(env) {
+  return env.LOCHUB_CUSTOM_BASE_URL || void 0;
+}
+var RATIO_TEXT = /^\d+(?:\.\d+)?$/;
+var EXTRA_TEXT = /^\d+$/;
+var CULTURE_KEY = /^[A-Za-z][A-Za-z0-9_-]*$/;
+function parseRatio(text) {
+  if (!RATIO_TEXT.test(text)) return void 0;
+  const ratio = Number(text);
+  return ratio >= 1 && ratio <= 5 ? ratio : void 0;
+}
+function parseLengthFlags(values) {
+  const flag = (name) => typeof values[name] === "string" ? values[name] : void 0;
+  const mode = flag("length-check") ?? LENGTH_CHECK_OFF.mode;
+  if (mode !== "off" && mode !== "warning" && mode !== "confirm") return { error: `Invalid --length-check ${mode}` };
+  const scope = flag("length-scope") ?? LENGTH_CHECK_OFF.scope;
+  if (scope !== "ui" && scope !== "all") return { error: `Invalid --length-scope ${scope}` };
+  const ratioText = flag("length-ratio");
+  const ratio = ratioText === void 0 ? LENGTH_CHECK_OFF.ratio : parseRatio(ratioText);
+  if (ratio === void 0) return { error: `Invalid --length-ratio ${ratioText} (a number from 1 to 5)` };
+  const extraText = flag("length-extra");
+  const extra = extraText === void 0 ? LENGTH_CHECK_OFF.extra : Number(extraText);
+  if (extraText !== void 0 && (!EXTRA_TEXT.test(extraText) || extra > 100))
+    return { error: `Invalid --length-extra ${extraText} (a whole number from 0 to 100)` };
+  const ratiosText = flag("length-ratios") ?? "";
+  const ratios = {};
+  const seen = /* @__PURE__ */ new Set();
+  for (const pair of ratiosText === "" ? [] : ratiosText.split(",")) {
+    const [culture = "", value = "", ...rest] = pair.split("=");
+    const parsed = parseRatio(value);
+    if (rest.length > 0 || !CULTURE_KEY.test(culture) || parsed === void 0 || seen.has(culture.toLowerCase()))
+      return { error: `Invalid --length-ratios ${ratiosText} (<culture>=<ratio>,... with each culture once and ratios from 1 to 5)` };
+    seen.add(culture.toLowerCase());
+    ratios[culture] = parsed;
+  }
+  const hint = flag("length-hint") ?? (LENGTH_CHECK_OFF.hint ? "on" : "off");
+  if (hint !== "on" && hint !== "off") return { error: `Invalid --length-hint ${hint}` };
+  return { mode, scope, ratio, extra, ratios, hint: hint === "on" };
+}
+function parseCliArgs(argv, env = process.env) {
   let parsed;
   try {
     parsed = parseArgs({
@@ -3160,7 +4047,21 @@ function parseCliArgs(argv) {
         "judge-model": { type: "string", default: "" },
         "web-dir": { type: "string", default: "" },
         "web-deps-dir": { type: "string", default: "" },
-        "brief-file": { type: "string", default: "" }
+        "brief-file": { type: "string", default: "" },
+        // --provider custom only; no defaults here, so "given with another provider" stays detectable.
+        "base-url": { type: "string" },
+        "key-header": { type: "string" },
+        "structured-output": { type: "string" },
+        "price-in": { type: "string" },
+        "price-out": { type: "string" },
+        "max-parallel": { type: "string" },
+        "request-timeout": { type: "string" },
+        "length-check": { type: "string" },
+        "length-scope": { type: "string" },
+        "length-ratio": { type: "string" },
+        "length-extra": { type: "string" },
+        "length-ratios": { type: "string" },
+        "length-hint": { type: "string" }
       }
     });
   } catch (error) {
@@ -3195,12 +4096,32 @@ ${USAGE}` };
     translateModel = translateModelArg;
     judgeModel = judgeModelArg;
   }
+  const customValues = {};
+  for (const flag of CUSTOM_FLAGS) {
+    const value = values[flag];
+    if (value !== void 0) customValues[flag] = value;
+  }
+  let custom;
+  if (provider === "custom") {
+    const parsedCustom = parseCustomEndpointFlags(customValues, resolveCustomBaseUrl(env));
+    if ("error" in parsedCustom) return { error: `${parsedCustom.error}
+${USAGE}` };
+    custom = parsedCustom;
+  } else {
+    const stray = CUSTOM_FLAGS.find((flag) => customValues[flag] !== void 0);
+    if (stray) return { error: `--${stray} is only available for --provider custom
+${USAGE}` };
+  }
+  const length = parseLengthFlags(values);
+  if ("error" in length) return { error: `${length.error}
+${USAGE}` };
   return {
     projectDir: values.project,
     port,
     host: "127.0.0.1",
     policy: values.policy,
-    ai: { provider, auth, translateModel, judgeModel },
+    ai: { provider, auth, translateModel, judgeModel, ...custom ? { custom } : {} },
+    length,
     ...values["web-dir"] ? { webDir: values["web-dir"] } : {},
     ...values["web-deps-dir"] ? { webDepsDir: values["web-deps-dir"] } : {},
     ...values["brief-file"] ? { briefFile: values["brief-file"] } : {}
@@ -3216,7 +4137,7 @@ async function main() {
   const apiKey = config.ai.auth === "api" ? resolveApiKey(process.env) : void 0;
   const llm = createLlmClient(config.ai, resolve3(config.projectDir), apiKey);
   const { text: brief, sha1: briefSha1 } = readBriefFile(config.briefFile);
-  const jobDefaults = { ...jobDefaultsFor(config.ai), brief };
+  const jobDefaults = { ...jobDefaultsFor(config.ai), brief, lengthCheck: config.length };
   const app = buildServer({
     store,
     llm,

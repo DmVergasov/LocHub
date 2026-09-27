@@ -57,7 +57,7 @@ tab, pick the culture you want to translate, and optionally narrow the scope to 
 3. The job runs in the background — translating, then a deterministic consistency check, then a second
    AI pass that judges each translation — and the tab shows live progress.
 
-![Jobs tab with an estimate](images/04_jobs_run.png)
+![Jobs tab with an estimate](images/05_jobs.png)
 
 > **Tip:** a job never overwrites a cell a human already touched — it turns its result into a suggestion
 > instead, so you never lose review work to a job that runs concurrently.
@@ -73,7 +73,7 @@ Switch to the **Review** tab (it shows a count when strings are waiting). Open a
 - Edit the text and **Save** to accept your own edit instead.
 - **Reject** with a short reason to send it back for another translation pass.
 
-![Review queue with a cell open](images/04_review_queue.png)
+![Review queue with a cell open](images/06_review_queue.png)
 
 Details on the Grid, Review queue and their statuses are in [07_Grid_and_Review.md](07_Grid_and_Review.md).
 

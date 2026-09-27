@@ -237,6 +237,37 @@ export class LocHubStore {
     return readJsonl<CellEvent>(this.pathFor(`events.${culture}.jsonl`)).filter((e) => e.unitId === unitId);
   }
 
+  // Several events in one write per culture file (an import applies many rows at once).
+  appendEvents(events: readonly CellEvent[]): void {
+    const byCulture = new Map<Culture, string>();
+    for (const event of events) byCulture.set(event.culture, (byCulture.get(event.culture) ?? '') + canonicalJson(event) + '\n');
+    for (const [culture, lines] of byCulture) appendFileSync(this.pathFor(`events.${culture}.jsonl`), lines, 'utf8');
+  }
+
+  // The newest event time (ms since epoch) per unit of one culture, skipping the `ignore` actions: import uses it to
+  // tell whether a cell changed after a translator's file was exported. Tolerant of a torn last line and of a bad
+  // timestamp, like afterTextsByUnit below.
+  latestEventTimes(culture: Culture, ignore: ReadonlySet<string>): Map<string, number> {
+    const out = new Map<string, number>();
+    const path = this.pathFor(`events.${culture}.jsonl`);
+    if (!existsSync(path)) return out;
+    for (const line of readFileSync(path, 'utf8').split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) continue;
+      let event: CellEvent;
+      try {
+        event = JSON.parse(trimmed) as CellEvent;
+      } catch {
+        continue;
+      }
+      if (ignore.has(event.action)) continue;
+      const time = Date.parse(event.ts);
+      if (Number.isNaN(time)) continue;
+      if (time > (out.get(event.unitId) ?? Number.NEGATIVE_INFINITY)) out.set(event.unitId, time);
+    }
+    return out;
+  }
+
   // Every text LocHub itself has ever produced for a cell of this culture, keyed by unit id: Push uses
   // this to tell a stale export (a text LocHub already produced, now reappearing from the archive) from a
   // genuine human edit. Reads the whole events file once per call instead of once per archive entry.

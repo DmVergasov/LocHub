@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { LocHubApi } from './api/client';
-import type { AiProvider, Health, JobScope, Meta } from './api/types';
+import type { AiProvider, EndpointHealth, EndpointStatus, Health, JobScope, Meta } from './api/types';
 import type { BridgeRoute, EditorBridge, SyncAction, SyncOutcome } from './bridge';
 import { extraColumns, loadChosenColumns, saveChosenColumns, visibleCultures } from './grid/columns';
 import { errorText } from './errors';
 import { GlossaryView } from './glossary/GlossaryView';
+import { ExchangeActions } from './exchange/ExchangeActions';
 import { GridView } from './grid/GridView';
 import { liveEntries, NO_FILTERS, type GridFilters, type GridRow } from './grid/model';
 import { useGridData } from './grid/useGridData';
@@ -34,7 +35,30 @@ export function editorStatus(health: Health | undefined, route: BridgeRoute): st
   return 'Editor: offline';
 }
 
-const AI_PROVIDER_LABEL: Record<AiProvider, string> = { anthropic: 'Anthropic', openai: 'OpenAI', xai: 'xAI', deepseek: 'DeepSeek', gemini: 'Gemini' };
+const AI_PROVIDER_LABEL: Record<AiProvider, string> = {
+  anthropic: 'Anthropic',
+  openai: 'OpenAI',
+  xai: 'xAI',
+  deepseek: 'DeepSeek',
+  gemini: 'Gemini',
+  custom: 'Custom',
+};
+
+// The Custom endpoint's startup probe (GET /api/health ai.endpoint.status), as the AI pill words it.
+const ENDPOINT_STATUS_LABEL: Record<EndpointStatus, string> = {
+  checking: 'checking endpoint…',
+  ok: 'endpoint OK',
+  model_missing: 'model missing',
+  unreachable: 'unreachable',
+  unknown: 'no model list',
+};
+
+// Only an unreachable endpoint is an error; a missing model, like a provider that is not ready, is a warning.
+function aiBadgeTone(ready: boolean, endpoint: EndpointHealth | undefined): string {
+  if (endpoint?.status === 'unreachable') return ' endpoint-error';
+  if (!ready || endpoint?.status === 'model_missing') return ' warning';
+  return '';
+}
 
 function AiBadge({ health }: { health: Health | undefined }) {
   if (!health) return null;
@@ -45,11 +69,16 @@ function AiBadge({ health }: { health: Health | undefined }) {
   // the current shape has a provider/models to show, so fall back to a plain Anthropic label but keep any
   // ready/detail warning that shape still carries.
   const isCurrentShape = typeof ai.provider === 'string' && ai.provider in AI_PROVIDER_LABEL;
+  const endpoint = isCurrentShape ? ai.endpoint : undefined;
+  // A Custom endpoint adds its host (the service never sends the path or query) and the probe status.
+  const host = endpoint ? ` (${endpoint.url.replace(/^https?:\/\//, '')})` : '';
+  const probe = endpoint ? ` · ${ENDPOINT_STATUS_LABEL[endpoint.status] ?? endpoint.status}` : '';
   const label = isCurrentShape
-    ? `AI: ${AI_PROVIDER_LABEL[ai.provider]}${ai.auth === 'subscription' ? ' (subscription)' : ''} · ${ai.translateModel} / ${ai.judgeModel}`
+    ? `AI: ${AI_PROVIDER_LABEL[ai.provider]}${ai.auth === 'subscription' ? ' (subscription)' : ''}${host} · ${ai.translateModel} / ${ai.judgeModel}${probe}`
     : 'AI: Anthropic';
+  const title = ai.ready ? (endpoint?.detail ?? '') : ai.detail;
   return (
-    <span className={`ai-status${ai.ready ? '' : ' warning'}`} title={ai.ready ? '' : ai.detail}>
+    <span className={`ai-status${aiBadgeTone(ai.ready, endpoint)}`} title={title}>
       {label}
     </span>
   );
@@ -209,6 +238,23 @@ export function App({ api, bridge, healthMs = 5000 }: AppProps) {
     lastJobsFinished.current = seen;
   }, [health?.jobsFinished, reload]);
 
+  // Length Check settings change (I-1): a different lengthArgs string means the editor restarted the service with
+  // new Length Check settings. That restart resets jobsFinished to 0, so the effect above never fires for it, and
+  // nothing else reloads the grid on its own — the cell panel's counter (GridRow.lengthLimit, filled by the last
+  // GET /api/cells) would otherwise keep the OLD limit even though the panel's own live check already runs
+  // against the NEW settings. Same shape as the jobsFinished effect above: remember the first value seen, then
+  // reload whenever a later poll reports a different one. An absent field (an older service) never reloads.
+  const lastLengthArgs = useRef<string | undefined>(undefined);
+
+  useEffect(() => {
+    const seen = health?.ai?.lengthArgs;
+    if (seen === undefined) return;
+    if (lastLengthArgs.current !== undefined && seen !== lastLengthArgs.current) {
+      void reload();
+    }
+    lastLengthArgs.current = seen;
+  }, [health?.ai?.lengthArgs, reload]);
+
   const loadMeta = useCallback(() => {
     return api.meta().then(setMeta, (e: unknown) => setError(errorText(e)));
   }, [api]);
@@ -332,6 +378,20 @@ export function App({ api, bridge, healthMs = 5000 }: AppProps) {
         scrollMemory={gridScroll.current}
         loadedCultures={grid.loadedCultures}
         loading={grid.loading}
+        toolbarExtra={(filtered) => (
+          // Keyed by culture: switching culture closes an open preview instead of importing into the new culture.
+          <ExchangeActions
+            key={culture}
+            api={api}
+            bridge={bridge}
+            culture={culture}
+            cultures={cultures}
+            nativeCulture={meta.nativeCulture}
+            filtered={filtered}
+            totalCount={grid.rows.length}
+            onImported={() => void reload()}
+          />
+        )}
       />
     );
   }

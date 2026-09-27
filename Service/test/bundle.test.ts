@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { customSettingsIdOf } from '../src/customEndpoint.js';
 
 const SERVICE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -115,4 +116,47 @@ describe('release bundle', () => {
       child.kill();
     }
   }, 60_000);
+
+  // M-8: cli.ts's main() wiring (config.length into jobDefaultsFor, the Custom endpoint config into
+  // createLlmClient) is untested -- dropping it leaves every unit test green, yet health would report
+  // "--length-check off" and no ai.endpoint, so the editor would restart the service on every poll. Spawns the
+  // real, committed bundle (Resources/LocHubService/lochub_service.mjs) -- the one the editor actually runs --
+  // with Custom endpoint and Length Check flags, and reads them back from /api/health.
+  // NB-3: the Base URL goes only through LOCHUB_CUSTOM_BASE_URL, exactly as the editor passes it (amendment 1) -- no
+  // --base-url on the command line -- so this proves main() reads the environment (cli.test.ts proves the flag still
+  // wins when given).
+  it('reports Length Check and Custom endpoint settings, Base URL from the environment, through the committed bundle\'s health (M-8)', async () => {
+    const serviceFile = join(SERVICE_DIR, '..', 'Resources', 'LocHubService', 'lochub_service.mjs');
+    const root = mkdtempSync(join(tmpdir(), 'lochub-custom-health-'));
+    const project = join(root, 'My Game');
+    mkdirSync(project);
+    const port = await freePort();
+    // Nothing listens here: the probe reports it unreachable quickly (ECONNREFUSED), which does not block
+    // /api/health from answering -- the probe runs in the background (server.ts).
+    const deadPort = await freePort();
+    const baseUrl = `http://127.0.0.1:${deadPort}/v1?token=x`;
+    const child = spawn(
+      process.execPath,
+      [
+        serviceFile, 'serve', '--project', project, '--port', String(port),
+        '--provider', 'custom', '--translate-model', 'qwen3:8b', '--judge-model', 'qwen3:8b',
+        '--key-header', 'bearer', '--structured-output', 'json_schema',
+        '--price-in', '0', '--price-out', '0', '--max-parallel', '2', '--request-timeout', '300',
+        '--length-check', 'warning', '--length-scope', 'ui', '--length-ratio', '1.30', '--length-extra', '4', '--length-hint', 'on',
+      ],
+      { stdio: 'ignore', env: { ...process.env, LOCHUB_CUSTOM_BASE_URL: baseUrl } },
+    );
+    try {
+      const health = await waitForHealth(port, 20_000);
+      const ai = health.ai as Record<string, unknown>;
+      expect(ai.lengthArgs).toBe('--length-check warning --length-scope ui --length-ratio 1.30 --length-extra 4 --length-hint on');
+      expect(ai.customSettingsId).toBe(customSettingsIdOf([baseUrl, 'bearer', 'json_schema', '0', '0', '2', '300']));
+      const endpoint = ai.endpoint as Record<string, unknown>;
+      expect(endpoint.url).toBe(`http://127.0.0.1:${deadPort}`);
+      expect(JSON.stringify(health)).not.toContain('token=x');
+      expect(JSON.stringify(health)).not.toContain('/v1');
+    } finally {
+      child.kill();
+    }
+  }, 30_000);
 });

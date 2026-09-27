@@ -114,6 +114,8 @@ export type CellEventAction =
   | 'ai_suggestion'
   | 'ai_refused'
   | 'ai_error'
+  // A translator's CSV/XLIFF work applied by POST /api/import.
+  | 'import'
   // Engine decisions recorded by applyExportAck: why a cell was written, or turned R by the engine.
   | 'engine_rejected'
   | 'exported';
@@ -210,4 +212,80 @@ export function isOutdated(unit: Unit, cell: Cell): boolean {
 // The blind-audit mark survives human actions: it is how the summary measures what triage missed.
 export function keepAudit(cell: Cell): string[] {
   return cell.qaFlags.filter((flag) => flag === 'audit');
+}
+
+// GET /api/health ai.endpoint, Custom (OpenAI-compatible) endpoints only: the service's startup probe of
+// GET {base}/models. 'checking' until it answers; only 'unreachable' means the endpoint cannot work as configured.
+export type EndpointStatus = 'checking' | 'ok' | 'model_missing' | 'unreachable' | 'unknown';
+
+export interface EndpointHealth {
+  // scheme://host[:port] of the Custom base URL: never its path, query or user info.
+  url: string;
+  status: EndpointStatus;
+  // Why, for every status except 'checking' and 'ok'. Never contains the key or the full base URL.
+  detail?: string;
+  // 'model_missing' only: the configured model ids the endpoint does not list.
+  missingModels?: string[];
+}
+
+// exportedAt as POST /api/import accepts it: ISO 8601 date-time, optional seconds/fraction, Z or ±HH:MM, or no zone
+// (read as UTC). The web app drops any other <file date> instead of failing the whole import.
+export const EXPORTED_AT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})?$/i;
+
+// Translation exchange (POST /api/import, CONTRACT.md): one string of a translator's CSV or XLIFF file, parsed by the
+// web app. unitId wins; namespace + key resolve an entry without one. exportedRevision/exportedAt say what the
+// translator's file was made from, for conflict detection.
+export interface ImportEntry {
+  unitId?: string;
+  namespace?: string;
+  key?: string;
+  source?: string;
+  text: string;
+  approved: boolean;
+  exportedRevision?: number;
+  exportedAt?: string;
+}
+
+export interface ImportRequest {
+  culture: Culture;
+  actor: string;
+  dryRun: boolean;
+  overwriteConflicts: boolean;
+  acceptConfirm: boolean;
+  // The digest of the dry-run preview the caller is applying. On apply (dryRun: false), a value that differs from
+  // the freshly recomputed digest means the store changed since that preview: nothing is written, and the fresh
+  // result comes back as 409 preview_stale. Absent for backward compatibility: an apply with no previewDigest is
+  // never refused on this ground.
+  previewDigest?: string;
+  entries: ImportEntry[];
+}
+
+export const IMPORT_OUTCOMES = ['changed', 'approved', 'changed_approved', 'unchanged', 'stale', 'unknown', 'empty', 'conflict', 'hard', 'confirm'] as const;
+export type ImportOutcome = (typeof IMPORT_OUTCOMES)[number];
+
+// Same shape as precheck.ts's PrecheckIssue, kept structural here so this module stays free of imports.
+export interface ImportIssue {
+  code: string;
+  severity: 'hard' | 'confirm' | 'soft';
+  message: string;
+}
+
+// issues/before/after: present for every entry that reached the conflict rule. conflict: a conflict was detected,
+// even when overwriteConflicts let the entry through.
+export interface ImportRow {
+  index: number;
+  unitId?: string;
+  outcome: ImportOutcome;
+  conflict?: true;
+  issues?: ImportIssue[];
+  before?: string;
+  after?: string;
+}
+
+export interface ImportResult {
+  rows: ImportRow[];
+  counts: Record<ImportOutcome, number>;
+  // sha256(JSON.stringify(rows)), first 16 hex characters: identifies this exact preview for the apply's
+  // previewDigest check (see ImportRequest.previewDigest).
+  digest: string;
 }

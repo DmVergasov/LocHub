@@ -21,6 +21,7 @@ import { join } from 'node:path';
 import { ResponseCache } from '../../Service/src/cache.js';
 import { approveCell, editCell } from '../../Service/src/cells.js';
 import {
+  isOutdated,
   KIND_METADATA_KEY,
   type CoverageFinding,
   type Culture,
@@ -35,7 +36,11 @@ import type { LlmClient, LlmOutcome, LlmRequest } from '../../Service/src/llm.js
 import { answerQuestion } from '../../Service/src/memory.js';
 import { applySnapshot } from '../../Service/src/push.js';
 import { LocHubStore } from '../../Service/src/store.js';
+import type { LengthCheckConfig } from '../../Service/src/lengthCheck.js';
+import { SHOOT_LENGTH_CHECK } from './shoot_length_check.mjs';
 import { SHOOT_PROVIDER } from './shoot_provider.mjs';
+import type { CellRow } from '../../Web/src/api/types';
+import { exchangeToCsv } from '../../Web/src/exchange/csv';
 
 const CULTURES: Culture[] = ['de', 'fr', 'ja'];
 
@@ -1000,10 +1005,26 @@ const tutorialUnits: UnitDef[] = [
 ];
 
 // ---------------------------------------------------------------------------------------------------
+// Length Check demo (shoot.mjs shot 10_length_check): a pause-menu button whose German label is far longer than the
+// button allows. "Save & Quit" has 11 visible characters, so with the Project Settings defaults (SHOOT_LENGTH_CHECK)
+// every culture gets ceil(11 x 1.3) + 4 = 19; the German draft has 40, French (17) and Japanese (14: CJK counts
+// double) fit. The job sends the German draft back once for a shorter wording (DemoLlmClient answers the same text
+// again), so it lands as an ai_draft in band Y with the too_long flag.
+// ---------------------------------------------------------------------------------------------------
+
+const lengthCheckUnits: UnitDef[] = [
+  u('ui.saveAndQuit', 'UI', 'Menus.SaveAndQuit', 'Save & Quit', WIDGET_ORIGIN('GameMenu', 'SaveAndQuit'), 'UI/GameMenu', {
+    kind: 'ui',
+    devNotes: 'Pause menu button. The button has a fixed width: keep the label short.',
+    localized: all('Speichern und zum Hauptmenü zurückkehren', 'Sauver et quitter', 'セーブして終了'),
+  }),
+];
+
+// ---------------------------------------------------------------------------------------------------
 // All units, lookups
 // ---------------------------------------------------------------------------------------------------
 
-const ALL_UNITS: UnitDef[] = [...uiUnits, ...itemUnits, ...dialogueUnits, ...questUnits, ...tutorialUnits];
+const ALL_UNITS: UnitDef[] = [...uiUnits, ...itemUnits, ...dialogueUnits, ...questUnits, ...tutorialUnits, ...lengthCheckUnits];
 
 function toSnapshotEntry(unit: UnitDef): SnapshotEntry {
   return {
@@ -1116,6 +1137,43 @@ const QUESTIONS_TO_ANSWER: { slug: string; culture: Culture; answer: string }[] 
 
 const ACTOR = 'demo-reviewer';
 
+// The translator's file the import-preview shot (shoot.mjs, 13_exchange_import) feeds to Import…: a real CSV export of
+// the translated German UI strings (the web app's own exchangeToCsv), edited the way a translator would, so the preview
+// shows every group — changed, approved, unchanged, skipped (an older source, a format problem), a conflict (an older
+// revision) and a warning to confirm.
+const EXCHANGE_SAMPLE_EDITS: { slug: string; text?: string; approve?: boolean; source?: string; revision?: number }[] = [
+  { slug: 'ui.continue', text: 'Weiterspielen' },
+  { slug: 'ui.credits', text: 'Danksagung' },
+  { slug: 'ui.inventoryFull', text: 'Dein Inventar ist voll!' },
+  { slug: 'ui.itemAdded', text: 'Gegenstand erhalten: {ItemName}', approve: true },
+  { slug: 'ui.quit', approve: true },
+  { slug: 'ui.pressToInteract', text: 'Drücke die Taste, um zu interagieren.' },
+  { slug: 'ui.afflicted', text: 'Du wurdest von {Status} befallen.' },
+  { slug: 'ui.newGame', source: 'New game' },
+  { slug: 'ui.stamina', text: 'Kondition', revision: 0 },
+];
+
+function buildExchangeSample(store: LocHubStore): string {
+  const edits = new Map(EXCHANGE_SAMPLE_EDITS.map((edit) => [idOf(edit.slug), edit]));
+  const rows: CellRow[] = [...store.units.values()]
+    .filter((unit) => unit.state === 'active' && unit.namespace === 'UI' && store.getCell('de', unit.id).text.length > 0)
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+    .map((unit) => {
+      const cell = store.getCell('de', unit.id);
+      const edit = edits.get(unit.id);
+      return {
+        unit: edit?.source ? { ...unit, source: edit.source } : unit,
+        cell: { ...cell, text: edit?.text ?? cell.text, status: edit?.approve ? 'approved' : cell.status, revision: edit?.revision ?? cell.revision },
+        outdated: isOutdated(unit, cell),
+        lengthLimit: null,
+      };
+    });
+  for (const { slug } of EXCHANGE_SAMPLE_EDITS) {
+    if (!rows.some((row) => row.unit.id === idOf(slug))) throw new Error(`demo_project: exchange sample ${slug} is not a translated German UI string`);
+  }
+  return exchangeToCsv(rows);
+}
+
 // ---------------------------------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------------------------------
@@ -1171,6 +1229,8 @@ export async function main(outDir: string): Promise<void> {
         // plus the real PROMPT_VERSION constant) agrees with the running service's own header.
         translateModel: SHOOT_PROVIDER.translateModel,
         judgeModel: SHOOT_PROVIDER.judgeModel,
+        // The Project Settings defaults, the same ones the shoot service runs with (shoot_length_check.mjs).
+        lengthCheck: SHOOT_LENGTH_CHECK.config as LengthCheckConfig,
         filter: { unitIds: TRANSLATED_IDS },
       };
       reports.push(await runTranslateJob(store, client, cache, opts));
@@ -1196,6 +1256,9 @@ export async function main(outDir: string): Promise<void> {
   // inside it: shoot.mjs reads this file by its own known path (join(projectDir, 'Localization',
   // 'push_snapshot.json')) after the rename, so it must not be renamed along with the store's own directory.
   writeFileSync(join(outDir, 'push_snapshot.json'), JSON.stringify(snapshot));
+
+  // Sibling to push_snapshot.json for the same reason: shoot.mjs's import-preview shot reads it by its own known path.
+  writeFileSync(join(outDir, 'exchange_sample_de.csv'), buildExchangeSample(store));
 
   // Read back from disk, the way the report asks: prove the store round-trips through the real APIs.
   const reread = LocHubStore.load(dataDir);

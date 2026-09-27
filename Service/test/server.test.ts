@@ -10,9 +10,10 @@ import { unitIdOf } from '../src/ids.js';
 import { DEFAULT_JOB_OPTIONS } from '../src/job.js';
 import { MISSING_KEY_MESSAGE } from '../src/llmShared.js';
 import { pluralCategories } from '../src/precheck.js';
-import type { AiConfig } from '../src/providers.js';
+import { jobDefaultsFor, NO_KEY_NEEDED_DETAIL, type AiConfig } from '../src/providers.js';
 import { applySnapshot } from '../src/push.js';
 import { buildServer } from '../src/server.js';
+import { LENGTH_CHECK_OFF, type LengthCheckConfig } from '../src/lengthCheck.js';
 import { LocHubStore } from '../src/store.js';
 import { FakeLlmClient, isJudgeRequest, ok, requestItems } from './fakeLlm.js';
 
@@ -130,6 +131,7 @@ describe('server', () => {
         provider: 'anthropic', auth: 'api', translateModel: 'claude-opus-5-5', judgeModel: 'claude-sonnet-5',
         // M-4: the detail text for a present key never names the internal variable.
         batch: true, ready: true, detail: 'API key is set', briefSha1: EMPTY_BRIEF_SHA1, keyId: API_KEY_ID,
+        lengthArgs: '--length-check off',
       },
     });
   });
@@ -231,6 +233,7 @@ describe('server', () => {
       ai: {
         provider: 'anthropic', auth: 'api', translateModel: 'claude-opus-5-5', judgeModel: 'claude-sonnet-5',
         batch: true, ready: true, detail: 'API key is set', briefSha1: EMPTY_BRIEF_SHA1, keyId: API_KEY_ID,
+        lengthArgs: '--length-check off',
       },
     });
   });
@@ -1407,5 +1410,208 @@ describe('buildServer web app wiring', () => {
     const shared = await webApp.inject({ method: 'GET', url: '/shared.txt' });
     expect(shared.statusCode).toBe(200);
     expect(shared.body).toBe('web-copy');
+  });
+});
+
+// Custom (OpenAI-compatible) endpoint. The base URL carries a path and a token in its query: neither may ever
+// reach /api/health. Every server built here injects endpointFetch, so the startup probe never reaches the network.
+const CUSTOM_AI: AiConfig = {
+  provider: 'custom',
+  auth: 'api',
+  translateModel: 'qwen3:8b',
+  judgeModel: 'qwen3:8b',
+  custom: {
+    baseUrl: 'http://127.0.0.1:11434/v1?token=secret-token',
+    keyHeader: 'bearer',
+    structuredOutput: 'json_schema',
+    priceIn: 0,
+    priceOut: 0,
+    maxParallel: 2,
+    requestTimeoutSeconds: 600,
+    settingsId: 'test-settings-id',
+  },
+};
+
+function modelsReply(ids: string[]): Response {
+  return new Response(JSON.stringify({ object: 'list', data: ids.map((id) => ({ id, object: 'model' })) }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+function customApp(env: NodeJS.ProcessEnv, endpointFetch: typeof fetch, ai: AiConfig = CUSTOM_AI, llmClient: FakeLlmClient = new FakeLlmClient(respond)) {
+  return buildServer({
+    store,
+    llm: llmClient,
+    cache: new ResponseCache(mkdtempSync(join(tmpdir(), 'lochub-srvc-'))),
+    jobDefaults: { ...jobDefaultsFor(ai), pollMs: 1 },
+    bridge: new BridgeHub(),
+    policy: 'validated',
+    port: PORT,
+    ai,
+    env,
+    endpointFetch,
+  });
+}
+
+describe('Custom endpoint health and key gates', () => {
+  const okFetch = (async () => modelsReply(['qwen3:8b'])) as typeof fetch;
+
+  it('reports the endpoint host, settings id and probe status, never the endpoint settings or the full base URL', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const seen: string[] = [];
+    const endpointFetch = (async (url: string | URL | Request) => {
+      seen.push(String(url));
+      await gate;
+      return modelsReply(['qwen3:8b']);
+    }) as typeof fetch;
+    const server = customApp({}, endpointFetch);
+
+    const first = await server.inject({ method: 'GET', url: '/api/health' });
+    expect(first.json().ai).toEqual({
+      provider: 'custom',
+      auth: 'api',
+      translateModel: 'qwen3:8b',
+      judgeModel: 'qwen3:8b',
+      batch: false,
+      briefSha1: EMPTY_BRIEF_SHA1,
+      keyId: '',
+      lengthArgs: '--length-check off',
+      ready: true,
+      detail: NO_KEY_NEEDED_DETAIL,
+      customSettingsId: 'test-settings-id',
+      endpoint: { url: 'http://127.0.0.1:11434', status: 'checking' },
+    });
+
+    release();
+    await vi.waitFor(async () => {
+      const health = await server.inject({ method: 'GET', url: '/api/health' });
+      expect(health.json().ai.endpoint).toEqual({ url: 'http://127.0.0.1:11434', status: 'ok' });
+    });
+    expect(seen).toEqual(['http://127.0.0.1:11434/v1/models?token=secret-token']);
+    const raw = (await server.inject({ method: 'GET', url: '/api/health' })).body;
+    expect(raw).not.toContain('secret-token');
+    expect(raw).not.toContain('/v1');
+  });
+
+  it('never probes anything for a built-in provider', async () => {
+    let probes = 0;
+    const counting = (async () => {
+      probes++;
+      return modelsReply([]);
+    }) as typeof fetch;
+    const openAi: AiConfig = { provider: 'openai', auth: 'api', translateModel: 'gpt-6-sol', judgeModel: 'gpt-6-luna' };
+    const health = await customApp(API_KEY_ENV, counting, openAi).inject({ method: 'GET', url: '/api/health' });
+    expect(health.json().ai).not.toHaveProperty('endpoint');
+    expect(health.json().ai).not.toHaveProperty('customSettingsId');
+    expect(probes).toBe(0);
+  });
+
+  it('runs estimate, jobs and retranslate without a key (no ai_not_ready for a custom endpoint)', async () => {
+    const estimate = await customApp({}, okFetch).inject({ method: 'POST', url: '/api/jobs/estimate', payload: { culture: 'ru' } });
+    expect(estimate.statusCode).toBe(200);
+    const job = await customApp({}, okFetch).inject({ method: 'POST', url: '/api/jobs', payload: { culture: 'ru' } });
+    expect(job.statusCode).toBe(202);
+    const tracked = new FakeLlmClient(respond);
+    const retranslate = await customApp({}, okFetch, CUSTOM_AI, tracked).inject({
+      method: 'POST',
+      url: `/api/cells/ru/${idA}/retranslate`,
+      payload: { note: 'It is a menu button' },
+    });
+    expect(retranslate.json().error).not.toBe('ai_not_ready');
+    expect(tracked.calls.length).toBeGreaterThan(0);
+  });
+});
+
+describe('Custom endpoint prices and Max USD', () => {
+  const okFetch = (async () => modelsReply(['qwen3:8b'])) as typeof fetch;
+  const priced: AiConfig = { ...CUSTOM_AI, custom: { ...CUSTOM_AI.custom!, priceIn: 1, priceOut: 2 } };
+
+  it('estimates usd 0 with pricesUnset and starts a job without maxUsd when both prices are 0', async () => {
+    const estimate = await customApp(API_KEY_ENV, okFetch).inject({ method: 'POST', url: '/api/jobs/estimate', payload: { culture: 'ru' } });
+    expect(estimate.statusCode).toBe(200);
+    expect(estimate.json().estimate).toMatchObject({ usd: 0, pricesUnset: true });
+    const job = await customApp(API_KEY_ENV, okFetch).inject({ method: 'POST', url: '/api/jobs', payload: { culture: 'ru' } });
+    expect(job.statusCode).toBe(202);
+  });
+
+  it('requires and enforces maxUsd exactly like a built-in provider once a price is set', async () => {
+    const estimate = await customApp(API_KEY_ENV, okFetch, priced).inject({ method: 'POST', url: '/api/jobs/estimate', payload: { culture: 'ru' } });
+    expect(estimate.json().estimate.usd).toBeGreaterThan(0);
+    expect(estimate.json().estimate).not.toHaveProperty('pricesUnset');
+    const missing = await customApp(API_KEY_ENV, okFetch, priced).inject({ method: 'POST', url: '/api/jobs', payload: { culture: 'ru' } });
+    expect(missing.statusCode).toBe(400);
+    expect(missing.json()).toEqual({ error: 'culture and maxUsd are required' });
+    const over = await customApp(API_KEY_ENV, okFetch, priced).inject({ method: 'POST', url: '/api/jobs', payload: { culture: 'ru', maxUsd: Number.MIN_VALUE } });
+    expect(over.statusCode).toBe(422);
+    expect(over.json().error).toBe('budget');
+  });
+});
+
+describe('Length Check: cell routes', () => {
+  // The shared snapshot's units carry no LocHub.Kind, so this service measures All strings. PAUSED has 6 visible
+  // characters: ceil(6 x 1.3) + 4 = 12.
+  const CONFIRM_ALL: LengthCheckConfig = { ...LENGTH_CHECK_OFF, mode: 'confirm', scope: 'all' };
+  const TOO_LONG = 'ПРИОСТАНОВЛЕНО НАДОЛГО'; // 22 visible characters
+  const ISSUE = { code: 'too_long', severity: 'confirm', message: 'Too long for the UI: 22/12 characters (Length Check in Project Settings)' };
+  const lengthApp = () =>
+    buildServer({
+      store,
+      llm,
+      cache: new ResponseCache(mkdtempSync(join(tmpdir(), 'lochub-srvlen-'))),
+      jobDefaults: { ...DEFAULT_JOB_OPTIONS, mode: 'sync', pollMs: 1, lengthCheck: CONFIRM_ALL },
+      bridge,
+      policy: 'validated',
+      port: PORT,
+    });
+
+  it('the check route reports too_long with the configured severity; a service with the check off reports nothing', async () => {
+    const res = await lengthApp().inject({ method: 'POST', url: `/api/cells/ru/${idA}/check`, payload: { text: TOO_LONG } });
+    expect(res.json().issues).toEqual([ISSUE]);
+    const plain = await app.inject({ method: 'POST', url: `/api/cells/ru/${idA}/check`, payload: { text: TOO_LONG } });
+    expect(plain.json().issues).toEqual([]);
+  });
+
+  it('edit and approve refuse an over-limit text until the reviewer accepts too_long', async () => {
+    const server = lengthApp();
+    const refused = await server.inject({ method: 'POST', url: `/api/cells/ru/${idA}/edit`, payload: { text: TOO_LONG } });
+    expect(refused.statusCode).toBe(422);
+    expect(refused.json()).toEqual({ error: 'Confirm these warnings to go ahead anyway: too_long', issues: [ISSUE] });
+    const saved = await server.inject({ method: 'POST', url: `/api/cells/ru/${idA}/edit`, payload: { text: TOO_LONG, accept: ['too_long'] } });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json().cell).toMatchObject({ text: TOO_LONG, status: 'edited' });
+    expect((await server.inject({ method: 'POST', url: `/api/cells/ru/${idA}/approve`, payload: {} })).statusCode).toBe(422);
+    const approved = await server.inject({ method: 'POST', url: `/api/cells/ru/${idA}/approve`, payload: { accept: ['too_long'] } });
+    expect(approved.statusCode).toBe(200);
+    expect(approved.json().cell.status).toBe('approved');
+  });
+});
+
+describe('Length Check: wire', () => {
+  // The shared snapshot's units carry no LocHub.Kind, so this service measures All strings. PAUSED (6 visible) gets
+  // ceil(6 x 1.3) + 4 = 12; '{Count} bales left' (11 visible) gets ceil(11 x 1.3) + 4 = 19.
+  const WARNING_ALL: LengthCheckConfig = { ...LENGTH_CHECK_OFF, mode: 'warning', scope: 'all' };
+  const wireApp = (lengthCheck: LengthCheckConfig) =>
+    buildServer({
+      store,
+      llm,
+      cache: new ResponseCache(mkdtempSync(join(tmpdir(), 'lochub-srvwire-'))),
+      jobDefaults: { ...DEFAULT_JOB_OPTIONS, mode: 'sync', pollMs: 1, lengthCheck },
+      bridge,
+      policy: 'validated',
+      port: PORT,
+    });
+
+  it('GET /api/cells gives every row its lengthLimit, and null while the check is off', async () => {
+    const rows = (await wireApp(WARNING_ALL).inject({ method: 'GET', url: '/api/cells?culture=ru' })).json().rows as { unit: { key: string }; lengthLimit: number | null }[];
+    expect(Object.fromEntries(rows.map((r) => [r.unit.key, r.lengthLimit]))).toEqual({ A: 12, B: 19 });
+    const offRows = (await app.inject({ method: 'GET', url: '/api/cells?culture=ru' })).json().rows as { lengthLimit: number | null }[];
+    expect(offRows.map((r) => r.lengthLimit)).toEqual([null, null]);
+  });
+
+  it('reports the Length Check flags it runs with as ai.lengthArgs', async () => {
+    const health = (await wireApp({ ...WARNING_ALL, ratios: { de: 1.5 } }).inject({ method: 'GET', url: '/api/health' })).json();
+    expect(health.ai.lengthArgs).toBe('--length-check warning --length-scope all --length-ratio 1.30 --length-extra 4 --length-ratios de=1.50 --length-hint on');
   });
 });

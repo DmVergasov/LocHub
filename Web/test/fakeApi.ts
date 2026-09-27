@@ -1,4 +1,5 @@
-import { BRIDGE_COMMANDS, emptyCell, isOutdated as contractOutdated } from '../../Service/src/contract';
+import { BRIDGE_COMMANDS, emptyCell, IMPORT_OUTCOMES, isOutdated as contractOutdated, type ImportEntry, type ImportRow } from '../../Service/src/contract';
+import { visibleLength } from '../../Service/src/lengthCheck';
 import type { GridCell, GridRow } from '../src/grid/model';
 import type { FetchLike } from '../src/api/client';
 import type { AiStatus, Cell, CellEvent, CoverageReport, GlossaryTerm, InboxItem, JobEstimate, JobProgress, PrecheckIssue, Unit } from '../src/api/types';
@@ -21,6 +22,9 @@ export interface FakeState {
   // JobEstimate.approximate in the fake's estimate/job replies: mimics a rate-limit/overloaded fallback (or
   // skipEstimate) having made part of the estimate a local guess instead of a real token count.
   estimateApproximate?: boolean;
+  // JobEstimate.pricesUnset in the fake's estimate/job replies: mimics a Custom endpoint whose Project Settings
+  // prices are both 0 (usd 0, Max USD cannot limit spending).
+  estimatePricesUnset?: boolean;
   // GET /api/jobs/:id answers "running" this many times before "done".
   jobPolls: number;
   // JobRecord.progress: set on the fake before a job starts to have GET /api/jobs/:id and ?culture= carry
@@ -56,6 +60,15 @@ export interface FakeState {
   // POST .../retranslate answers with these issues for the new suggestion (a real service would compute them
   // from the suggestion text); undefined mimics the common case of a suggestion with nothing wrong with it.
   retranslateIssues?: PrecheckIssue[];
+  // GET /api/cells row's lengthLimit (Service/src/lengthCheck.ts lengthLimitFor), keyed by unit id: an absent
+  // entry (or the whole field left undefined) sends null, "no limit", same as the real service. Culture is not
+  // modeled here — a test fake, not the real per-culture computation. checkIssuesFor also reads this (with
+  // lengthCheckSeverity below) to add a 'too_long' issue, mirroring Service/src/precheck.ts so the live check,
+  // the approve/edit gate and the card counter all agree in tests too (M-3).
+  lengthLimits?: Record<string, number | null>;
+  // Severity checkIssuesFor's too_long issue uses when a lengthLimits entry is exceeded. Mirrors
+  // Service/src/lengthCheck.ts LengthCheckMode ('warning' -> 'soft', the default; 'confirm' -> 'confirm').
+  lengthCheckSeverity?: 'soft' | 'confirm';
 }
 
 export function makeUnit(key: string, source: string, extra: Partial<Unit> = {}): Unit {
@@ -91,21 +104,50 @@ function reply(status: number, body: unknown): Response {
 
 const CELL_ROUTE = /^\/api\/cells\/([^/]+)\/([^/]+)\/(approve|edit|reject|retranslate|history|check)$/;
 
+// A cheap, deterministic stand-in for the real service's sha256 digest (Service/src/exchange.ts): distinguishes
+// "these are the same preview rows" from "something changed" well enough for a test fake. Never compared against a
+// real service's digest, and not meant to be collision-resistant.
+function fakeDigest(rows: readonly ImportRow[]): string {
+  const text = JSON.stringify(rows);
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) hash = (Math.imul(hash, 31) + text.charCodeAt(i)) | 0;
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
 // The fake's stand-in for the real precheck (Service/src/precheck.ts), one example per tier: "{Broken}" stands
 // for an argument the source does not have (hard: Unreal prints it raw), a source argument the text leaves out
-// is a confirm issue (valid for Unreal, probably a mistake), and text identical to the source is soft.
-function checkIssuesFor(unit: Unit, text: string): PrecheckIssue[] {
+// is a confirm issue (valid for Unreal, probably a mistake), and text identical to the source is soft. A
+// too_long issue (also soft or confirm, per lengthCheckSeverity) is added on top when the text is over the
+// unit's lengthLimits entry, the same way precheck.ts adds it alongside whatever else it found.
+function checkIssuesFor(unit: Unit, text: string, state: Pick<FakeState, 'lengthLimits' | 'lengthCheckSeverity'>): PrecheckIssue[] {
   if (text.includes('{Broken}')) return [{ code: 'args_extra', severity: 'hard', message: 'Unknown arguments: Broken' }];
   const missing = [...unit.source.matchAll(/\{(\w+)\}/g)].map((m) => m[1]!).filter((arg) => !text.includes(`{${arg}}`));
   if (missing.length > 0) return [{ code: 'args_missing', severity: 'confirm', message: `Missing arguments: ${missing.join(', ')}` }];
-  if (text.trim().length > 0 && text.trim() === unit.source.trim()) return [{ code: 'untranslated', severity: 'soft', message: 'Translation is identical to the source' }];
-  return [];
+  const issues: PrecheckIssue[] = [];
+  if (text.trim().length > 0 && text.trim() === unit.source.trim())
+    issues.push({ code: 'untranslated', severity: 'soft', message: 'Translation is identical to the source' });
+  const limit = state.lengthLimits?.[unit.id];
+  if (typeof limit === 'number') {
+    const length = visibleLength(text);
+    if (length > limit)
+      issues.push({
+        code: 'too_long',
+        severity: state.lengthCheckSeverity ?? 'soft',
+        message: `Too long for the UI: ${length}/${limit} characters (Length Check in Project Settings)`,
+      });
+  }
+  return issues;
 }
 
 // Same gate as Service/src/cells.ts checkOrThrow: a hard issue is refused, a confirm issue only passes when
 // `accept` names every confirm code. Returns the 422 body, or the accepted codes for the event.
-function gate(unit: Unit, text: string, accept: unknown): { refusal: { error: string; issues: PrecheckIssue[] } } | { accepted: string[] } {
-  const issues = checkIssuesFor(unit, text);
+function gate(
+  unit: Unit,
+  text: string,
+  accept: unknown,
+  state: Pick<FakeState, 'lengthLimits' | 'lengthCheckSeverity'>,
+): { refusal: { error: string; issues: PrecheckIssue[] } } | { accepted: string[] } {
+  const issues = checkIssuesFor(unit, text, state);
   if (issues.some((i) => i.severity === 'hard')) return { refusal: { error: 'Precheck failed', issues } };
   const accepted = [...new Set(issues.filter((i) => i.severity === 'confirm').map((i) => i.code))];
   const named = Array.isArray(accept) ? accept : [];
@@ -197,6 +239,7 @@ export function createFakeApi(initial: Partial<FakeState> = {}) {
       usd: state.estimateUsd,
       ...(strings === null ? {} : { strings }),
       ...(state.estimateApproximate ? { approximate: true } : {}),
+      ...(state.estimatePricesUnset ? { pricesUnset: true } : {}),
     };
   };
 
@@ -238,7 +281,8 @@ export function createFakeApi(initial: Partial<FakeState> = {}) {
         .filter((unit) => unit.state === 'active')
         .map((unit) => {
           const cell = cellOf(culture, unit.id);
-          return { unit, cell, outdated: isOutdated(unit, cell) };
+          // The real service always sends lengthLimit (server.ts, lengthLimitFor); null means "no limit" (M-3).
+          return { unit, cell, outdated: isOutdated(unit, cell), lengthLimit: state.lengthLimits?.[unit.id] ?? null };
         })
         .filter((row) => !query.get('band') || row.cell.band === query.get('band'))
         .filter((row) => !query.get('status') || row.cell.status === query.get('status'))
@@ -264,7 +308,7 @@ export function createFakeApi(initial: Partial<FakeState> = {}) {
       }
       if (action === 'check') {
         if (state.checkFails) return reply(500, { error: 'boom' });
-        const issues = checkIssuesFor(unit, String(body.text ?? ''));
+        const issues = checkIssuesFor(unit, String(body.text ?? ''), state);
         if (state.holdChecks) {
           await new Promise<void>((resolve) => pendingChecks.push({ text: String(body.text ?? ''), resolve }));
         }
@@ -290,7 +334,7 @@ export function createFakeApi(initial: Partial<FakeState> = {}) {
       let accepted: string[] = [];
       if (action === 'approve' || action === 'edit') {
         const text = action === 'edit' ? String(body.text ?? '') : cell.text;
-        const verdict = gate(unit, text, body.accept);
+        const verdict = gate(unit, text, body.accept, state);
         if ('refusal' in verdict) return reply(422, verdict.refusal);
         accepted = verdict.accepted;
         next = action === 'approve' ? { ...cell, status: 'approved', revision: cell.revision + 1 } : { ...cell, text, status: 'edited', suggestion: '', revision: cell.revision + 1 };
@@ -440,6 +484,56 @@ export function createFakeApi(initial: Partial<FakeState> = {}) {
       if (!state.editorConnected) return reply(409, { error: 'editor_not_connected' });
       state.commands.push({ name: String(body.name), args: (body.args ?? {}) as Record<string, unknown> });
       return reply(202, { delivered: 1 });
+    }
+
+    // A small stand-in for Service/src/exchange.ts: the same outcome names and rule order, checkIssuesFor as the
+    // check, applied row by row (the real route is all or nothing). digest identifies one exact preview: an apply
+    // whose previewDigest no longer matches (the store changed since the dry run) is refused with 409 preview_stale
+    // and writes nothing, mirroring the real service's previewDigest/digest pair.
+    if (method === 'POST' && path === '/api/import') {
+      const culture = String(body.culture ?? '');
+      const dryRun = body.dryRun !== false;
+      if (!dryRun && String(body.actor ?? '').trim() === '') return reply(400, { error: 'actor is required' });
+      const entries = (Array.isArray(body.entries) ? body.entries : []) as ImportEntry[];
+      const writes: { unitId: string; cell: Cell; entry: ImportEntry; outcome: ImportRow['outcome'] }[] = [];
+      const rows: ImportRow[] = entries.map((entry, index) => {
+        const unit = state.units.find((u) =>
+          entry.unitId !== undefined ? u.id === entry.unitId : u.namespace === (entry.namespace ?? '') && u.key === entry.key,
+        );
+        if (!unit || unit.state !== 'active') return { index, outcome: 'unknown' };
+        if (entry.source !== undefined && entry.source !== unit.source) return { index, unitId: unit.id, outcome: 'stale' };
+        if (entry.text.trim() === '') return { index, unitId: unit.id, outcome: 'empty' };
+        const cell = cellOf(culture, unit.id);
+        // An approval writes when the cell is not approved yet, or is approved for an older source and this file
+        // shows the current one (mirrors Service/src/exchange.ts's `approves`: a re-approval of an outdated string).
+        const approves = entry.approved && (cell.status !== 'approved' || (entry.source !== undefined && contractOutdated(unit, cell)));
+        if (entry.text === cell.text && !approves) return { index, unitId: unit.id, outcome: 'unchanged' };
+        const conflict = entry.exportedRevision !== undefined && entry.exportedRevision !== cell.revision;
+        const issues = checkIssuesFor(unit, entry.text, state);
+        const row: ImportRow = { index, unitId: unit.id, outcome: 'unchanged', ...(conflict ? { conflict: true as const } : {}), issues, before: cell.text, after: entry.text };
+        if (conflict && body.overwriteConflicts !== true) row.outcome = 'conflict';
+        else if (issues.some((issue) => issue.severity === 'hard')) row.outcome = 'hard';
+        else if (issues.some((issue) => issue.severity === 'confirm') && body.acceptConfirm !== true) row.outcome = 'confirm';
+        else {
+          // An overwritten conflict never approves, whatever the text: it refers to a state of the string LocHub
+          // has since changed, so it always lands as changed (the reviewer's own edit). A carried-over approval
+          // (the cell was already approved at export) never approves new text either.
+          row.outcome = conflict ? 'changed' : entry.text === cell.text ? 'approved' : entry.approved && cell.status !== 'approved' ? 'changed_approved' : 'changed';
+          writes.push({ unitId: unit.id, cell, entry, outcome: row.outcome });
+        }
+        return row;
+      });
+      const counts = Object.fromEntries(IMPORT_OUTCOMES.map((outcome) => [outcome, rows.filter((row) => row.outcome === outcome).length]));
+      const digest = fakeDigest(rows);
+      // The apply refuses to write anything other than what its own preview showed. Absent previewDigest, apply as
+      // before (backward compatible).
+      if (!dryRun && typeof body.previewDigest === 'string' && body.previewDigest !== digest) {
+        return reply(409, { error: 'preview_stale', message: 'LocHub changed since the preview. Check the new preview and import again.', result: { rows, counts, digest } });
+      }
+      if (!dryRun) {
+        for (const { cell, entry, outcome } of writes) putCell({ ...cell, text: entry.text, status: outcome === 'changed' ? 'edited' : 'approved', revision: cell.revision + 1 });
+      }
+      return reply(200, { rows, counts, digest });
     }
 
     return reply(404, { error: `Fake has no route ${method} ${path}` });

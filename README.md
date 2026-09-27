@@ -21,11 +21,12 @@ Need a commercial license before the Fab listing is live? Email
 ![Unreal Engine 5.6--5.8](https://img.shields.io/badge/Unreal%20Engine-5.6--5.8-313131)
 ![Platform: Windows (tested)](https://img.shields.io/badge/Platform-Windows%20%28tested%29-informational)
 
-![Grid overview](Docs/images/07_grid_overview.png)
-![Cell panel](Docs/images/07_cell_panel.png)
-![Translated in context](Docs/images/07_context.png)
-![Review queue](Docs/images/07_review_queue.png)
-![Jobs](Docs/images/09_jobs.png)
+![Grid overview](Docs/images/01_grid_overview.png)
+![Review queue](Docs/images/06_review_queue.png)
+![Local model on a Custom endpoint](Docs/images/09_custom_endpoint_status.png)
+![Translated in context](Docs/images/15_context.png)
+![Export for translators](Docs/images/12_export_dialog.png)
+![Glossary](Docs/images/17_glossary.png)
 
 <!-- WHY-LOCHUB:BEGIN — keep this section identical in README.md and Docs/Fab/listing.md. -->
 ## Why LocHub
@@ -42,6 +43,7 @@ Need a commercial license before the Fab listing is live? Email
 - **Your glossary is followed.** Fixed terms and do-not-translate words go to the translator and the judge with
   every request; do-not-translate terms are also checked in code. Change a term, and every string that uses it
   is queued for re-translation in one click.
+- Translations that would overflow your UI are flagged, and the AI is told the length limit up front.
 - Human edits are never overwritten by the AI.
 - Changed source text marks its translations outdated; they are not shipped until updated.
 - You choose what ships: only approved strings, or everything that passed the checks.
@@ -51,11 +53,13 @@ Need a commercial license before the Fab listing is live? Email
 - Works in an editor tab: a fast grid, filters, and a keyboard-driven review queue.
 - Jump from a string to its asset or C++ line; preview a language in the editor live.
 - Glossary CSV import/export; the AI asks you questions instead of guessing.
+- Work with human translators: export to XLIFF or CSV, import their work back through the same checks.
 
 **Simple**
 - One click sets up your localization target. No accounts, no servers.
-- Bring your own key: Anthropic, OpenAI, xAI, DeepSeek or Google Gemini — or, for Anthropic, your own Claude
-  subscription via Claude Code, no key needed.
+- Bring your own key: Anthropic, OpenAI, xAI, DeepSeek, Google Gemini or any OpenAI-compatible endpoint,
+  including local models (Ollama, LM Studio) — or, for Anthropic, your own Claude subscription via Claude
+  Code, no key needed.
 - Output is ordinary archives and `.locres` — stop using LocHub any time.
 <!-- WHY-LOCHUB:END -->
 
@@ -77,9 +81,16 @@ workflow around it.
   issues come in tiers: a **hard** issue (broken format arguments, dropped rich-text tags, invalid syntax)
   blocks Approve and Save outright; a **confirm** issue (a plural form modifier lost, an argument possibly
   missing) can be approved or saved anyway once a human has looked at it.
+- **Length Check** — flags translations that would overflow your UI: each UI string gets a limit from its English
+  length (Chinese, Japanese and Korean characters count double, placeholders and tags not at all), the AI is told the
+  limit up front, and the cell panel counts characters as you type. Settings in Project Settings > Plugins > LocHub >
+  Length Check.
 - **Glossary** — per-culture terms and do-not-translate words, a free-text style guide, and CSV import/export.
   A project-wide brief (Project Settings > Plugins > LocHub > AI > Project Brief) gives every job shared
   context across all cultures.
+- **Translation exchange** — export a culture to XLIFF 1.2 for a translation vendor's CAT tool, or to CSV for
+  volunteers in a spreadsheet; import their work back through the same format checks, with a preview, conflict
+  detection and the reviewer's name on every string.
 - **Inbox** — questions the AI asks instead of guessing reach a per-string inbox; your answer is sent back
   as a developer note on the source text.
 - **Coverage** — a report of player-visible strings that bypass localization entirely (a literal
@@ -99,6 +110,11 @@ Bring your own API key for one of:
 - xAI (Grok)
 - DeepSeek
 - Google Gemini
+- Any OpenAI-compatible endpoint (**Custom (OpenAI-compatible)**): a local model (Ollama, LM Studio, llama.cpp
+  server, vLLM), a router (OpenRouter) or a private deployment (Azure OpenAI)
+
+For a Custom endpoint the key is optional: a local server needs none, and with a local model your text never
+leaves your machine. See [`Docs/05_AI_Providers_and_Keys.md`](Docs/05_AI_Providers_and_Keys.md) for recipes.
 
 Enter your key in **Project Settings > Plugins > LocHub > AI > API Key**, one field per provider. It is saved
 in `Config/DefaultEditor.ini` with the other LocHub settings, so it travels with the project like any other
@@ -117,7 +133,8 @@ this mode. See [`Docs/05_AI_Providers_and_Keys.md`](Docs/05_AI_Providers_and_Key
 - **Windows** — tested. **macOS and Linux** — the C++, the local Node service and the web UI are written to
   be portable and Fab ships them prebuilt there too, but the author has not tested LocHub on macOS or Linux.
 - [Node.js](https://nodejs.org/) 22.11 or newer, to run LocHub's local service on `127.0.0.1`.
-- An API key for one of the supported AI providers above — or, for Anthropic, a signed-in
+- An API key for one of the supported AI providers above, or an OpenAI-compatible endpoint (a local one needs
+  no key) — or, for Anthropic, a signed-in
   [Claude Code](https://claude.com/product/claude-code) CLI on `PATH` instead (optional; only needed for
   Claude Subscription auth).
 

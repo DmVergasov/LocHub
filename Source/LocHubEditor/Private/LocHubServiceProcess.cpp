@@ -43,14 +43,45 @@ namespace LocHubServiceProcessPrivate
 		return Pid;
 	}
 
-	/** Provider/auth/models for a log line; never includes an API key or env value. */
-	FString DescribeAiConfig(const FString& InProvider, const FString& InAuth, const FString& InTranslateModel, const FString& InJudgeModel)
+	/** A Length Check culture ratio override key the service accepts (cli.ts): ASCII letters, digits, '-' and '_', starting
+	 *  with a letter -- a culture ("pt-BR") or a language ("de"). */
+	bool IsLengthCultureKey(const FString& InKey)
 	{
-		return FString::Printf(TEXT("%s/%s %s/%s"), *InProvider, *InAuth, *InTranslateModel, *InJudgeModel);
+		for (int32 Index = 0; Index < InKey.Len(); ++Index)
+		{
+			const TCHAR Char = InKey[Index];
+			const bool bLetter = (Char >= TEXT('a') && Char <= TEXT('z')) || (Char >= TEXT('A') && Char <= TEXT('Z'));
+			const bool bDigitOrSeparator = (Char >= TEXT('0') && Char <= TEXT('9')) || Char == TEXT('-') || Char == TEXT('_');
+			if (!bLetter && (Index == 0 || !bDigitOrSeparator))
+			{
+				return false;
+			}
+		}
+		return !InKey.IsEmpty();
+	}
+
+	/** The Length Check flags of a check that is off: what BuildLengthArguments writes when it is disabled and what a
+	 *  service started without any --length-* flag reports (Service/src/lengthCheck.ts lengthArgsOf, LENGTH_CHECK_OFF). */
+	const TCHAR* const LengthCheckOffArguments = TEXT("--length-check off");
+
+	/** The Length Check flags a service started with InConfig reports as ai.lengthArgs: no flags means its own default, off. */
+	FString ExpectedLengthArgs(const FLocHubServiceProcess::FConfig& InConfig)
+	{
+		return InConfig.LengthArguments.IsEmpty() ? FString(LengthCheckOffArguments) : InConfig.LengthArguments;
+	}
+
+	/** A price from a hand-edited ini, clamped to 0 or above -- and to 0, not left as is, when it is not even a
+	 *  real number (M-6): FMath::Max(Inf, 0.0f) stays Inf, and FString::SanitizeFloat then writes out "inf", which
+	 *  the service's parsePrice refuses, stopping it from starting on exactly the malformed ini value this is
+	 *  meant to survive. */
+	float SanitizePrice(const float InValue)
+	{
+		return FMath::IsFinite(InValue) ? FMath::Max(InValue, 0.0f) : 0.0f;
 	}
 }
 
 const TCHAR* const FLocHubServiceProcess::ApiKeyEnvVarName = TEXT("LOCHUB_API_KEY");
+const TCHAR* const FLocHubServiceProcess::BaseUrlEnvVarName = TEXT("LOCHUB_CUSTOM_BASE_URL");
 
 FLocHubServiceProcess::FLocHubServiceProcess(FConfig InConfig)
 	: TerminateProcessFn([](FProcHandle& InHandle, const uint32 InPid) { LocHubChildProcess::Terminate(InHandle, InPid, ELocHubStopMode::Graceful); })
@@ -89,6 +120,29 @@ FLocHubServiceProcess::FConfig FLocHubServiceProcess::MakeDefaultConfig()
 		Result.ApiKey.Reset();
 	}
 	Result.KeyId = ComputeKeyId(Result.ApiKey);
+	// Filled only while Custom is the provider: a Custom field edited while it is hidden never changes another
+	// provider's config, and so never restarts its service.
+	if (Settings->AiProvider == ELocHubAiProvider::Custom)
+	{
+		// A local user often runs one model: an empty Judge Model judges with the translate model. The service keeps
+		// requiring both flags, so the fallback lives here.
+		if (Result.JudgeModel.IsEmpty())
+		{
+			Result.JudgeModel = Result.TranslateModel;
+		}
+		FString BaseUrl = Settings->CustomBaseUrl.TrimStartAndEnd();
+		BaseUrl.RemoveFromEnd(TEXT("/"));
+		Result.CustomBaseUrl = BaseUrl;
+		Result.CustomKeyHeader = ULocHubSettings::CustomKeyHeaderToString(Settings->CustomKeyHeader);
+		Result.CustomStructuredOutput = ULocHubSettings::StructuredOutputToString(Settings->CustomStructuredOutput);
+		// Clamped again here: ClampMin/ClampMax guard only the Details panel, not a hand-edited DefaultEditor.ini, and
+		// the service refuses to start on a value outside these ranges.
+		Result.CustomPriceIn = FString::SanitizeFloat(LocHubServiceProcessPrivate::SanitizePrice(Settings->CustomInputPricePerMTok), 0);
+		Result.CustomPriceOut = FString::SanitizeFloat(LocHubServiceProcessPrivate::SanitizePrice(Settings->CustomOutputPricePerMTok), 0);
+		Result.CustomMaxParallel = FMath::Clamp(Settings->CustomMaxParallelRequests, 1, 32);
+		Result.CustomRequestTimeoutSeconds = FMath::Clamp(Settings->CustomRequestTimeoutSeconds, 30, 300);
+		Result.CustomSettingsId = ComputeCustomSettingsId(Result);
+	}
 
 	FString ProjectDir = LocHubEnvironment::GetProjectDir();
 	ProjectDir.RemoveFromEnd(TEXT("/"));
@@ -105,14 +159,80 @@ FLocHubServiceProcess::FConfig FLocHubServiceProcess::MakeDefaultConfig()
 	// Project Settings brief (Brief BS design); the hash lets IsAiConfigApplied tell a brief-only edit apart from
 	// an unrelated settings change without ever comparing the brief text itself.
 	Result.BriefSha1 = WriteBriefFile(Result.StateDir / TEXT("brief.md"), Settings->ProjectBrief);
+	Result.LengthArguments = BuildLengthArguments(*Settings);
 	return Result;
 }
 
 FString FLocHubServiceProcess::BuildServeArguments(const FConfig& InConfig)
 {
-	return FString::Printf(TEXT("\"%s\" serve --project \"%s\" --port %d --policy %s --provider %s --auth %s --translate-model \"%s\" --judge-model \"%s\" --web-dir \"%s\" --web-deps-dir \"%s\" --brief-file \"%s\""),
+	FString Arguments = FString::Printf(TEXT("\"%s\" serve --project \"%s\" --port %d --policy %s --provider %s --auth %s --translate-model \"%s\" --judge-model \"%s\" --web-dir \"%s\" --web-deps-dir \"%s\" --brief-file \"%s\""),
 		*InConfig.ServiceScript, *InConfig.ProjectDir, InConfig.Port, *InConfig.Policy, *InConfig.Provider, *InConfig.Auth, *InConfig.TranslateModel,
 		*InConfig.JudgeModel, *InConfig.WebDir, *InConfig.WebDepsDir, *(InConfig.StateDir / TEXT("brief.md")));
+	if (InConfig.Provider.Equals(TEXT("custom"), ESearchCase::CaseSensitive))
+	{
+		// The key never goes here, and neither does the Base URL: they reach the child only through
+		// LOCHUB_API_KEY and LOCHUB_CUSTOM_BASE_URL (StartNode). The engine itself can log the whole serve line on
+		// a failed spawn (Windows' CreateProcess) or mis-split it at a trailing '=' (macOS), so anything worth
+		// keeping off a log line travels in the environment instead of on this command line.
+		Arguments += FString::Printf(TEXT(" --key-header %s --structured-output %s --price-in %s --price-out %s --max-parallel %d --request-timeout %d"),
+			*InConfig.CustomKeyHeader, *InConfig.CustomStructuredOutput, *InConfig.CustomPriceIn, *InConfig.CustomPriceOut,
+			InConfig.CustomMaxParallel, InConfig.CustomRequestTimeoutSeconds);
+	}
+	// Unquoted on purpose: the flags hold no spaces (BuildLengthArguments skips a culture key that would), and the service
+	// echoes them back verbatim as /api/health's ai.lengthArgs.
+	if (!InConfig.LengthArguments.IsEmpty())
+	{
+		Arguments += TEXT(" ") + InConfig.LengthArguments;
+	}
+	return Arguments;
+}
+
+FString FLocHubServiceProcess::BuildLengthArguments(const ULocHubSettings& InSettings)
+{
+	if (!InSettings.bEnableLengthCheck)
+	{
+		return LocHubServiceProcessPrivate::LengthCheckOffArguments;
+	}
+
+	// Two decimals: the precision the service applies a ratio with (Service/src/lengthCheck.ts lengthLimitFor), and the form
+	// its lengthArgsOf writes the flags back in, so the /api/health comparison matches character for character.
+	FString Arguments = FString::Printf(TEXT("--length-check %s --length-scope %s --length-ratio %.2f --length-extra %d"),
+		*ULocHubSettings::LengthSeverityToString(InSettings.LengthSeverity),
+		*ULocHubSettings::LengthScopeToString(InSettings.LengthCheckScope),
+		FMath::Clamp(InSettings.MaxLengthRatio, 1.0f, 5.0f),
+		FMath::Clamp(InSettings.ExtraCharacters, 0, 100));
+
+	TArray<TPair<FString, float>> Overrides;
+	TSet<FString> Seen;
+	for (const TPair<FString, float>& Override : InSettings.CultureRatioOverrides)
+	{
+		const FString Culture = Override.Key.TrimStartAndEnd();
+		if (Culture.IsEmpty())
+		{
+			// A row just added in Project Settings and not named yet: nothing to apply, nothing to warn about.
+			continue;
+		}
+		// "serve" refuses a key it cannot read (cli.ts), which would stop the service from starting at all: skip it instead.
+		if (!LocHubServiceProcessPrivate::IsLengthCultureKey(Culture) || Seen.Contains(Culture))
+		{
+			UE_LOG(LogLocHub, Warning, TEXT("Length Check: skipping the culture ratio override \"%s\": use a culture or language code such as de or pt-BR, listed once."), *Override.Key);
+			continue;
+		}
+		Seen.Add(Culture);
+		Overrides.Emplace(Culture, FMath::Clamp(Override.Value, 1.0f, 5.0f));
+	}
+	if (Overrides.Num() > 0)
+	{
+		Overrides.Sort([](const TPair<FString, float>& InA, const TPair<FString, float>& InB) { return InA.Key < InB.Key; });
+		TArray<FString> Pairs;
+		for (const TPair<FString, float>& Override : Overrides)
+		{
+			Pairs.Add(FString::Printf(TEXT("%s=%.2f"), *Override.Key, Override.Value));
+		}
+		Arguments += TEXT(" --length-ratios ") + FString::Join(Pairs, TEXT(","));
+	}
+	Arguments += InSettings.bTellTranslator ? TEXT(" --length-hint on") : TEXT(" --length-hint off");
+	return Arguments;
 }
 
 FString FLocHubServiceProcess::HashBriefUtf8(const FString& InText)
@@ -127,6 +247,190 @@ FString FLocHubServiceProcess::ComputeKeyId(const FString& InKey)
 {
 	// Same rule as an absent key on the service side (key-contract.md §3): empty in, empty out, never SHA-1("").
 	return InKey.IsEmpty() ? FString() : HashBriefUtf8(InKey).Left(12);
+}
+
+FString FLocHubServiceProcess::ComputeCustomSettingsId(const FConfig& InConfig)
+{
+	const TArray<FString> Values = {
+		InConfig.CustomBaseUrl,
+		InConfig.CustomKeyHeader,
+		InConfig.CustomStructuredOutput,
+		InConfig.CustomPriceIn,
+		InConfig.CustomPriceOut,
+		FString::FromInt(InConfig.CustomMaxParallel),
+		FString::FromInt(InConfig.CustomRequestTimeoutSeconds)};
+	return HashBriefUtf8(FString::Join(Values, TEXT("\n"))).Left(12);
+}
+
+FString FLocHubServiceProcess::ReduceBaseUrl(const FString& InUrl)
+{
+	const int32 SchemeEnd = InUrl.Find(TEXT("://"), ESearchCase::CaseSensitive);
+	if (SchemeEnd == INDEX_NONE)
+	{
+		return FString();
+	}
+	// Everything before "://" is shown as is, so it has to be the scheme itself: the restart line logs this before
+	// DescribeConfigProblem runs, and a pasted "user:password@" or header in front of the scheme would reach it.
+	const FString Scheme = InUrl.Left(SchemeEnd);
+	if (!Scheme.Equals(TEXT("http"), ESearchCase::IgnoreCase) && !Scheme.Equals(TEXT("https"), ESearchCase::IgnoreCase))
+	{
+		return FString();
+	}
+	const int32 AuthorityStart = SchemeEnd + 3;
+	int32 AuthorityEnd = InUrl.Len();
+	for (int32 Index = AuthorityStart; Index < InUrl.Len(); ++Index)
+	{
+		const TCHAR Char = InUrl[Index];
+		// '\' ends the authority too: WHATWG URL parsing treats it as '/' for http and https.
+		if (Char == TEXT('/') || Char == TEXT('?') || Char == TEXT('#') || Char == TEXT('\\'))
+		{
+			AuthorityEnd = Index;
+			break;
+		}
+	}
+	// An '@' past the authority may close user info whose raw password holds one of the characters above, which
+	// ended the authority early: show no host at all rather than the start of a password.
+	if (InUrl.Find(TEXT("@"), ESearchCase::CaseSensitive, ESearchDir::FromStart, AuthorityEnd) != INDEX_NONE)
+	{
+		return FString();
+	}
+	FString Authority = InUrl.Mid(AuthorityStart, AuthorityEnd - AuthorityStart);
+	// User info ("user:password@") never leaves this function.
+	int32 AtIndex = INDEX_NONE;
+	if (Authority.FindLastChar(TEXT('@'), AtIndex))
+	{
+		Authority = Authority.RightChop(AtIndex + 1);
+	}
+	// Whitelist, not another special case: only a host of this shape, optionally followed by ':' and 1-5 digits no
+	// greater than 65535, ever leaves this function. Anything else -- a '%' (an escaped '@' among them), a
+	// non-digit port, a port above 65535, a second ':', an empty host, a space or non-ASCII -- reduces to empty, so
+	// nothing of it is ever shown. This guarantees only that whatever leaves here is scheme://host[:port] of
+	// exactly this shape -- it does not close every raw '/', '?', '#' or '\' in a password ahead of a "%40" (M-3):
+	// when the text before that delimiter happens to be 1-5 digits no greater than 65535
+	// (https://svc:2024/Secret%40api.example.com/v1), those digits parse as a port and "svc:2024" reduces through.
+	// By URL semantics that really is the host and port, so the rule this function exists for -- never more than
+	// scheme://host[:port] leaves it -- still holds; see LocHub.CustomEndpoint.ReduceBaseUrl's digit-only password
+	// prefix case.
+	int32 HostEnd = 0;
+	if (Authority.StartsWith(TEXT("["), ESearchCase::CaseSensitive))
+	{
+		// A bracketed IPv6 literal: '[', hex digits, ':' or '.', then ']'.
+		int32 BracketEnd = INDEX_NONE;
+		for (int32 Index = 1; Index < Authority.Len(); ++Index)
+		{
+			const TCHAR Char = Authority[Index];
+			if (Char == TEXT(']'))
+			{
+				BracketEnd = Index;
+				break;
+			}
+			const bool bHex = (Char >= TEXT('0') && Char <= TEXT('9')) || (Char >= TEXT('a') && Char <= TEXT('f')) || (Char >= TEXT('A') && Char <= TEXT('F'));
+			if (!bHex && Char != TEXT(':') && Char != TEXT('.'))
+			{
+				return FString();
+			}
+		}
+		if (BracketEnd <= 1)
+		{
+			// No closing ']', or an empty "[]".
+			return FString();
+		}
+		HostEnd = BracketEnd + 1;
+	}
+	else
+	{
+		for (; HostEnd < Authority.Len(); ++HostEnd)
+		{
+			const TCHAR Char = Authority[HostEnd];
+			const bool bLetter = (Char >= TEXT('a') && Char <= TEXT('z')) || (Char >= TEXT('A') && Char <= TEXT('Z'));
+			const bool bDigit = Char >= TEXT('0') && Char <= TEXT('9');
+			if (!bLetter && !bDigit && Char != TEXT('.') && Char != TEXT('-') && Char != TEXT('_'))
+			{
+				break;
+			}
+		}
+		if (HostEnd == 0)
+		{
+			// No host at all.
+			return FString();
+		}
+	}
+	if (HostEnd == Authority.Len())
+	{
+		return InUrl.Left(AuthorityStart) + Authority;
+	}
+	if (Authority[HostEnd] != TEXT(':'))
+	{
+		// Trailing bytes after the host that are not a port separator.
+		return FString();
+	}
+	const int32 PortLen = Authority.Len() - HostEnd - 1;
+	if (PortLen < 1 || PortLen > 5)
+	{
+		return FString();
+	}
+	for (int32 Index = HostEnd + 1; Index < Authority.Len(); ++Index)
+	{
+		if (Authority[Index] < TEXT('0') || Authority[Index] > TEXT('9'))
+		{
+			return FString();
+		}
+	}
+	// A port above 65535 (M-2) cannot be a real TCP port: DescribeConfigProblem refuses these too, by way of an
+	// empty reduction giving it no acceptable host.
+	if (FCString::Atoi(*Authority.RightChop(HostEnd + 1)) > 65535)
+	{
+		return FString();
+	}
+	return InUrl.Left(AuthorityStart) + Authority;
+}
+
+FString FLocHubServiceProcess::DescribeAiConfig(const FString& InProvider, const FString& InAuth, const FString& InEndpoint, const FString& InTranslateModel, const FString& InJudgeModel)
+{
+	const FString Reduced = ReduceBaseUrl(InEndpoint);
+	const FString Endpoint = Reduced.IsEmpty() ? FString() : Reduced + TEXT(" ");
+	return FString::Printf(TEXT("%s/%s %s%s/%s"), *InProvider, *InAuth, *Endpoint, *InTranslateModel, *InJudgeModel);
+}
+
+FString FLocHubServiceProcess::DescribeConfigProblem(const FConfig& InConfig)
+{
+	if (!InConfig.Provider.Equals(TEXT("custom"), ESearchCase::CaseSensitive))
+	{
+		return FString();
+	}
+	const FString& Url = InConfig.CustomBaseUrl;
+	const bool bHttpScheme = Url.StartsWith(TEXT("http://"), ESearchCase::IgnoreCase) || Url.StartsWith(TEXT("https://"), ESearchCase::IgnoreCase);
+	const FString Reduced = ReduceBaseUrl(Url);
+	// Any '@' is user info or cannot be told apart from it (a raw password may hold '/', '?' or '#'), and so is a
+	// "%40" that leaves ReduceBaseUrl no host to show: the user-info '@' written escaped. Either would put a password
+	// on the serve line, and the service's fetch refuses such a URL anyway; a real '@' in the path or query can be
+	// written %40.
+	if (bHttpScheme && (Url.Contains(TEXT("@"), ESearchCase::CaseSensitive)
+		|| (Reduced.IsEmpty() && Url.Contains(TEXT("%40"), ESearchCase::CaseSensitive))))
+	{
+		return TEXT("Remove the user name and password from Base URL in Project Settings > Plugins > LocHub > AI; ")
+			TEXT("put the key in API Key instead. A literal '@' in the path or query must be written as %40.");
+	}
+	if (!bHttpScheme)
+	{
+		// A wrong or missing scheme: distinct from "has a scheme but no acceptable host" below (M-2), so the
+		// message points at the right half of the URL.
+		return TEXT("Set Base URL in Project Settings > Plugins > LocHub > AI; it must start with http:// or https://.");
+	}
+	// ReduceBaseUrl keeps "scheme://" plus a host of the shape it accepts (including a port up to 65535) and
+	// returns empty otherwise (":port" alone included), so a reduced form no longer than its "scheme://" has no
+	// acceptable host.
+	const bool bHasHost = Reduced.Len() > Url.Find(TEXT("://"), ESearchCase::CaseSensitive) + 3;
+	if (!bHasHost)
+	{
+		return TEXT("Set Base URL in Project Settings > Plugins > LocHub > AI to an http:// or https:// URL with a ")
+			TEXT("host name or IP address, such as http://localhost:11434/v1.");
+	}
+	if (InConfig.TranslateModel.IsEmpty())
+	{
+		return TEXT("Set Custom Models > Translate Model in Project Settings > Plugins > LocHub > AI.");
+	}
+	return FString();
 }
 
 FString FLocHubServiceProcess::WriteBriefFile(const FString& InPath, const FString& InBrief)
@@ -162,7 +466,9 @@ void FLocHubServiceProcess::SetConfig(FConfig InConfig)
 		|| !Config.TranslateModel.Equals(InConfig.TranslateModel, ESearchCase::CaseSensitive)
 		|| !Config.JudgeModel.Equals(InConfig.JudgeModel, ESearchCase::CaseSensitive)
 		|| !Config.KeyId.Equals(InConfig.KeyId, ESearchCase::CaseSensitive)
-		|| !Config.BriefSha1.Equals(InConfig.BriefSha1, ESearchCase::CaseSensitive);
+		|| !Config.BriefSha1.Equals(InConfig.BriefSha1, ESearchCase::CaseSensitive)
+		|| !Config.CustomSettingsId.Equals(InConfig.CustomSettingsId, ESearchCase::CaseSensitive)
+		|| !Config.LengthArguments.Equals(InConfig.LengthArguments, ESearchCase::CaseSensitive);
 	if (bAiConfigChanged)
 	{
 		bAiRestartTried = false;
@@ -204,7 +510,13 @@ bool FLocHubServiceProcess::IsAiConfigApplied(const FConfig& InConfig, const FLo
 	// "both empty" then falls out of the ordinary string equality below (key-contract.md §3).
 	const bool bKeyApplied = !InHealth.bHasAiKeyId
 		|| InConfig.KeyId.Equals(InHealth.AiKeyId, ESearchCase::CaseSensitive);
-	return bTranslateModelApplied && bJudgeModelApplied && bBriefApplied && bKeyApplied;
+	// The service reports customSettingsId only for the Custom provider (an older service never): absent means
+	// nothing to compare -- a provider switch already differs in provider and models above.
+	const bool bCustomApplied = !InHealth.bHasAiCustomSettingsId || InConfig.CustomSettingsId.Equals(InHealth.AiCustomSettingsId, ESearchCase::CaseSensitive);
+	// Like the key id, only an old service build without the field skips the comparison.
+	const bool bLengthApplied = !InHealth.bHasAiLengthArgs
+		|| LocHubServiceProcessPrivate::ExpectedLengthArgs(InConfig).Equals(InHealth.AiLengthArgs, ESearchCase::CaseSensitive);
+	return bTranslateModelApplied && bJudgeModelApplied && bBriefApplied && bKeyApplied && bCustomApplied && bLengthApplied;
 }
 
 bool FLocHubServiceProcess::MayStopAdoptedPid(const FString& InAdoptedExecutable, const FString& InCurrentExecutable)
@@ -441,16 +753,21 @@ void FLocHubServiceProcess::OnHealthProbed(const uint32 InGeneration, const FLoc
 			// line, only whether either changed.
 			const bool bBriefChanged = !Config.BriefSha1.Equals(InHealth.AiBriefSha1, ESearchCase::CaseSensitive);
 			const bool bKeyChanged = InHealth.bHasAiKeyId && !Config.KeyId.Equals(InHealth.AiKeyId, ESearchCase::CaseSensitive);
+			const bool bCustomChanged = InHealth.bHasAiCustomSettingsId && !Config.CustomSettingsId.Equals(InHealth.AiCustomSettingsId, ESearchCase::CaseSensitive);
+			const bool bLengthChanged = InHealth.bHasAiLengthArgs
+				&& !LocHubServiceProcessPrivate::ExpectedLengthArgs(Config).Equals(InHealth.AiLengthArgs, ESearchCase::CaseSensitive);
 			const FString BriefNote = FString(bBriefChanged ? TEXT(", brief changed") : TEXT(""))
-				+ (bKeyChanged ? TEXT(", key changed") : TEXT(""));
+				+ (bKeyChanged ? TEXT(", key changed") : TEXT(""))
+				+ (bCustomChanged ? TEXT(", custom endpoint settings changed") : TEXT(""))
+				+ (bLengthChanged ? TEXT(", length check changed") : TEXT(""));
 			if (!InHealth.bJobRunning && !bAiRestartTried)
 			{
 				bAiRestartTried = true;
 				// Whatever wait was pending is over: this restart applies the new AI settings right now.
 				ClearAiRestartPending();
 				UE_LOG(LogLocHub, Display, TEXT("Restarting the LocHub service (pid %u): AI settings changed (%s -> %s)%s."), ProcessId,
-					*LocHubServiceProcessPrivate::DescribeAiConfig(InHealth.AiProvider, InHealth.AiAuth, InHealth.AiTranslateModel, InHealth.AiJudgeModel),
-					*LocHubServiceProcessPrivate::DescribeAiConfig(Config.Provider, Config.Auth, Config.TranslateModel, Config.JudgeModel), *BriefNote);
+					*DescribeAiConfig(InHealth.AiProvider, InHealth.AiAuth, InHealth.AiEndpointUrl, InHealth.AiTranslateModel, InHealth.AiJudgeModel),
+					*DescribeAiConfig(Config.Provider, Config.Auth, Config.CustomBaseUrl, Config.TranslateModel, Config.JudgeModel), *BriefNote);
 				StopProcess();
 				StartOrFail();
 				return;
@@ -473,8 +790,8 @@ void FLocHubServiceProcess::OnHealthProbed(const uint32 InGeneration, const FLoc
 				// Already tried once for this Config and the fresh process still disagrees: never loop restarting.
 				ClearAiRestartPending();
 				UE_LOG(LogLocHub, Warning, TEXT("The LocHub service (pid %u) still reports AI settings %s after a restart; Project Settings now ask for %s%s. Use Tools > LocHub > Restart Service."), ProcessId,
-					*LocHubServiceProcessPrivate::DescribeAiConfig(InHealth.AiProvider, InHealth.AiAuth, InHealth.AiTranslateModel, InHealth.AiJudgeModel),
-					*LocHubServiceProcessPrivate::DescribeAiConfig(Config.Provider, Config.Auth, Config.TranslateModel, Config.JudgeModel), *BriefNote);
+					*DescribeAiConfig(InHealth.AiProvider, InHealth.AiAuth, InHealth.AiEndpointUrl, InHealth.AiTranslateModel, InHealth.AiJudgeModel),
+					*DescribeAiConfig(Config.Provider, Config.Auth, Config.CustomBaseUrl, Config.TranslateModel, Config.JudgeModel), *BriefNote);
 			}
 			FinishWaiters(true, FString());
 			return;
@@ -517,6 +834,15 @@ bool FLocHubServiceProcess::StartNode(FString& OutError)
 	// removed here, never killed on its say-so alone.
 	RemoveStalePidFile();
 
+	// Settings that can never start the service fail here, with a fix the user can act on, before Node.js is even
+	// looked for: the service would only exit with a usage error nobody sees.
+	const FString ConfigProblem = DescribeConfigProblem(Config);
+	if (!ConfigProblem.IsEmpty())
+	{
+		OutError = ConfigProblem;
+		return false;
+	}
+
 	// Every tool launch reaches this same classification -- there is no separate check at editor startup any more.
 	const FLocHubNodeCheck NodeCheck = LocHubEnvironment::CheckNode();
 	if (NodeCheck.Status != ELocHubNodeStatus::Ok)
@@ -544,18 +870,24 @@ bool FLocHubServiceProcess::StartNode(FString& OutError)
 	}
 
 	const FString Arguments = BuildServeArguments(Config);
+	// Unlike the key, the Custom base URL used to reach this line too (as --base-url) and had to be redacted before
+	// it could be logged. It travels only through LOCHUB_CUSTOM_BASE_URL now (I-1), so Arguments never carries it
+	// and is always safe to log, spawn-fail error or write to service.log exactly as built.
 	uint32 NewProcessId = 0;
 	{
 		// LocHubProcessSpawnLock held for the whole section: without it, a concurrent CreateProc elsewhere in the
 		// process (LocHubEnvironment::RunBoundedProcess, or any other holder listed in LocHubProcessSpawnLock.h)
-		// could inherit LOCHUB_API_KEY on Windows (CreateProcess snapshots the environment at the moment it is
-		// called) or race this SetEnvironmentVar/CreateProc/SetEnvironmentVar sequence on Mac/Linux (setenv/unsetenv
-		// concurrent with posix_spawn is a data race in the C library, not just a logical one).
+		// could inherit LOCHUB_API_KEY or LOCHUB_CUSTOM_BASE_URL on Windows (CreateProcess snapshots the
+		// environment at the moment it is called) or race this SetEnvironmentVar/CreateProc/SetEnvironmentVar
+		// sequence on Mac/Linux (setenv/unsetenv concurrent with posix_spawn is a data race in the C library, not
+		// just a logical one).
 		FScopeLock SpawnLock(&LocHubProcessSpawnLock::Get());
 		// Scoped tightly around the spawn: CreateProc snapshots the editor's environment for the child at this
-		// point, and the destructor below restores the editor's own value (or clears it) before anything else runs,
-		// so no later child this editor starts -- and no log line, since the key is never printed -- ever sees it.
+		// point, and each destructor below restores the editor's own value (or clears it) before anything else
+		// runs, so no later child this editor starts -- and no log line, since neither is ever printed -- ever
+		// sees either.
 		const FLocHubScopedEnvVar ApiKeyEnvVar(ApiKeyEnvVarName, Config.ApiKey);
+		const FLocHubScopedEnvVar BaseUrlEnvVar(BaseUrlEnvVarName, Config.CustomBaseUrl);
 		ProcessHandle = CreateProcessFn(Node, Arguments, Config.ProjectDir, PipeWrite, NewProcessId);
 	}
 	if (!ProcessHandle.IsValid())
@@ -573,8 +905,13 @@ bool FLocHubServiceProcess::StartNode(FString& OutError)
 	// A one-number file from an older build is still readable -- ParseLeadingPid/TryAdoptOrphan
 	// treat a missing host as unknown and fall back to the pre-fix "adopt when the node pid matches" behaviour.
 	FFileHelper::SaveStringToFile(FString::Printf(TEXT("%u %u"), ProcessId, FPlatformProcess::GetCurrentProcessId()), *GetPidFilePath());
-	FFileHelper::SaveStringToFile(FString::Printf(TEXT("[LocHub] %s %s\n"), *Node, *Arguments), *GetLogFilePath(), FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
-	UE_LOG(LogLocHub, Display, TEXT("Started the LocHub service (pid %u): %s %s"), ProcessId, *Node, *Arguments);
+	// The serve line no longer names a Custom endpoint (its Base URL travels in the environment), so the start line
+	// does, reduced to scheme://host[:port] like everywhere else it is shown.
+	const FString EndpointNote = Config.Provider.Equals(TEXT("custom"), ESearchCase::CaseSensitive)
+		? FString::Printf(TEXT(" (endpoint %s)"), *ReduceBaseUrl(Config.CustomBaseUrl))
+		: FString();
+	FFileHelper::SaveStringToFile(FString::Printf(TEXT("[LocHub] %s %s%s\n"), *Node, *Arguments, *EndpointNote), *GetLogFilePath(), FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+	UE_LOG(LogLocHub, Display, TEXT("Started the LocHub service (pid %u): %s %s%s"), ProcessId, *Node, *Arguments, *EndpointNote);
 
 	const TWeakPtr<FLocHubServiceProcess> WeakSelf = AsWeak();
 	TickerHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([WeakSelf](const float InDeltaTime) -> bool

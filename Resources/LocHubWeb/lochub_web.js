@@ -116,6 +116,11 @@ class LocHubApi {
   check(culture, unitId, text) {
     return this.request("POST", `/api/cells/${segment(culture)}/${segment(unitId)}/check`, { text });
   }
+  // Translation exchange (CONTRACT.md, POST /api/import): a dry run for the preview, then the same request with
+  // dryRun false to apply it.
+  importTranslations(request) {
+    return this.request("POST", "/api/import", request);
+  }
   retranslate(culture, unitId, note, asRule) {
     return this.request("POST", `/api/cells/${segment(culture)}/${segment(unitId)}/retranslate`, { note, asRule });
   }
@@ -223,6 +228,7 @@ function errorText(error) {
 }
 const CSV_FILE_TYPES = "CSV files (*.csv)|*.csv|All files (*.*)|*.*";
 const EXPORT_TITLE = "Export CSV";
+const CSV_MIME = "text/csv;charset=utf-8";
 function base64ToBytes(base64) {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
@@ -256,8 +262,8 @@ function pickFileFromBrowser(accept) {
     input.click();
   });
 }
-function downloadInBrowser(name, text) {
-  const blob = new Blob(["\uFEFF" + text], { type: "text/csv;charset=utf-8" });
+function downloadInBrowser(name, text, mime) {
+  const blob = new Blob(["\uFEFF" + text], { type: mime });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -269,15 +275,15 @@ function downloadInBrowser(name, text) {
   URL.revokeObjectURL(url);
   return {};
 }
-async function pickTextFile(bridge, title, accept) {
+async function pickTextFile(bridge, title, accept, fileTypes = CSV_FILE_TYPES) {
   if (!bridge.canPickFile()) return pickFileFromBrowser(accept);
-  const result = await bridge.pickFile(title, CSV_FILE_TYPES);
+  const result = await bridge.pickFile(title, fileTypes);
   if (result.cancelled) return null;
   return { name: result.name, bytes: base64ToBytes(result.base64) };
 }
-async function saveTextFile(bridge, name, text) {
-  if (!bridge.canSaveFile()) return downloadInBrowser(name, text);
-  const result = await bridge.saveFile(EXPORT_TITLE, name, CSV_FILE_TYPES, text);
+async function saveTextFile(bridge, name, text, fileTypes = CSV_FILE_TYPES, title = EXPORT_TITLE, mime = CSV_MIME) {
+  if (!bridge.canSaveFile()) return downloadInBrowser(name, text, mime);
+  const result = await bridge.saveFile(title, name, fileTypes, text);
   if (result.cancelled) return null;
   return { path: result.path };
 }
@@ -357,13 +363,13 @@ function parseCsv(text) {
   const delimiter = detectDelimiter(text);
   const rows = [];
   let row = [];
-  let field = "";
+  let field2 = "";
   let inQuotes = false;
   let i = 0;
   const n = text.length;
   const endField = () => {
-    row.push(field);
-    field = "";
+    row.push(field2);
+    field2 = "";
   };
   const endRow = () => {
     endField();
@@ -375,7 +381,7 @@ function parseCsv(text) {
     if (inQuotes) {
       if (ch === '"') {
         if (text[i + 1] === '"') {
-          field += '"';
+          field2 += '"';
           i += 2;
           continue;
         }
@@ -383,17 +389,17 @@ function parseCsv(text) {
         i += 1;
         continue;
       }
-      field += ch;
+      field2 += ch;
       i += 1;
       continue;
     }
     if (ch === '"') {
-      if (field.length === 0) {
+      if (field2.length === 0) {
         inQuotes = true;
         i += 1;
         continue;
       }
-      field += ch;
+      field2 += ch;
       i += 1;
       continue;
     }
@@ -407,10 +413,10 @@ function parseCsv(text) {
       i += ch === "\r" && text[i + 1] === "\n" ? 2 : 1;
       continue;
     }
-    field += ch;
+    field2 += ch;
     i += 1;
   }
-  if (field.length > 0 || row.length > 0) endRow();
+  if (field2.length > 0 || row.length > 0) endRow();
   while (rows.length > 0) {
     const last = rows[rows.length - 1];
     if (last.length === 1 && last[0] === "") rows.pop();
@@ -914,6 +920,783 @@ function GlossaryView({ api: api2, culture, rows, onCell, onTermFix, bridge, cul
     error && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "error", role: "alert", children: error })
   ] });
 }
+function emptyCell(unitId, culture) {
+  return {
+    unitId,
+    culture,
+    text: "",
+    status: "empty",
+    basedOnSourceRev: 0,
+    basedOnSource: "",
+    provenance: "",
+    ambiguity: "none",
+    alts: [],
+    question: "",
+    note: "",
+    suggestion: "",
+    judgeIssues: [],
+    qaFlags: [],
+    band: "",
+    archiveHash: "",
+    revision: 0
+  };
+}
+function isOutdated(unit, cell) {
+  return cell.status !== "empty" && cell.text.length > 0 && cell.basedOnSourceRev < unit.sourceRev;
+}
+const EXPORTED_AT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})?$/i;
+const LINE_SUFFIX = /(?:\((\d+)\)|:(\d+))$/;
+const FILE_EXTENSION = /\.(c|cc|cpp|cs|csv|h|hpp|inl|ini|json|py|rml|txt)$/i;
+function parseOrigin(origin) {
+  let path = origin.trim().replaceAll("\\", "/");
+  let line = 0;
+  const suffix = LINE_SUFFIX.exec(path);
+  if (suffix && suffix.index > 1) {
+    line = Number(suffix[1] ?? suffix[2]);
+    path = path.slice(0, suffix.index);
+  }
+  if (path.length === 0) return { kind: "unknown", path: "", line: 0 };
+  if (path.startsWith("/") && !FILE_EXTENSION.test(path)) {
+    if (path.startsWith("/Script/")) return { kind: "unknown", path, line: 0 };
+    return { kind: "asset", path: path.split(".")[0] ?? path, line: 0 };
+  }
+  return { kind: "file", path: path.replace(/^\/+/, ""), line };
+}
+function originLabel(origin) {
+  return origin.kind === "file" && origin.line > 0 ? `${origin.path}:${origin.line}` : origin.path;
+}
+function describeOrigin(origin) {
+  const parsed = parseOrigin(origin);
+  if (parsed.kind !== "asset") return { ...parsed, member: "" };
+  const normalized = origin.trim().replaceAll("\\", "/");
+  const prefix = `${parsed.path}.`;
+  return { ...parsed, member: normalized.startsWith(prefix) ? normalized.slice(prefix.length) : "" };
+}
+const NO_FILTERS = { q: "", status: "", band: "", outdated: false, namespace: "", asset: "" };
+function compareText(a, b) {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+function computeSearch(unit, cells) {
+  return [unit.key, unit.source, ...Object.values(cells).map((c) => c.cell.text)].join(" ").toLowerCase();
+}
+function mergeCulture(data, culture, rows) {
+  const next = new Map(data);
+  for (const { unit, cell, outdated, lengthLimit } of rows) {
+    const existing = next.get(unit.id);
+    const cells = { ...(existing == null ? void 0 : existing.cells) ?? {}, [culture]: { cell, outdated, lengthLimit } };
+    if (existing !== void 0 && (existing.unit.sourceRev !== unit.sourceRev || existing.unit.source !== unit.source)) {
+      const refreshedCells = {};
+      const sourceChanged = existing.unit.source !== unit.source;
+      for (const [c, gridCell] of Object.entries(cells)) {
+        const lengthLimit2 = c === culture || !sourceChanged ? gridCell.lengthLimit : void 0;
+        refreshedCells[c] = { cell: gridCell.cell, outdated: isOutdated(unit, gridCell.cell), lengthLimit: lengthLimit2 };
+      }
+      next.set(unit.id, { unit, cells: refreshedCells, search: computeSearch(unit, refreshedCells) });
+      continue;
+    }
+    const base = (existing == null ? void 0 : existing.search) ?? `${unit.key} ${unit.source}`.toLowerCase();
+    next.set(unit.id, { unit, cells, search: `${base} ${cell.text.toLowerCase()}` });
+  }
+  return next;
+}
+function dropCultures(data, cultures) {
+  if (cultures.length === 0) return data;
+  const next = new Map(data);
+  for (const [id, row] of next) {
+    if (!cultures.some((c) => c in row.cells)) continue;
+    const cells = { ...row.cells };
+    for (const c of cultures) delete cells[c];
+    next.set(id, { ...row, cells, search: computeSearch(row.unit, cells) });
+  }
+  return next;
+}
+function withCell(data, cell) {
+  var _a;
+  const row = data.get(cell.unitId);
+  if (!row) return data;
+  const next = new Map(data);
+  const cells = { ...row.cells, [cell.culture]: { cell, outdated: isOutdated(row.unit, cell), lengthLimit: (_a = row.cells[cell.culture]) == null ? void 0 : _a.lengthLimit } };
+  next.set(cell.unitId, { ...row, cells, search: computeSearch(row.unit, cells) });
+  return next;
+}
+function withUnit(data, unit) {
+  const row = data.get(unit.id);
+  if (!row) return data;
+  const next = new Map(data);
+  const cells = {};
+  for (const [culture, gridCell] of Object.entries(row.cells)) {
+    const lengthLimit = unit.source === row.unit.source ? gridCell.lengthLimit : void 0;
+    cells[culture] = { cell: gridCell.cell, outdated: isOutdated(unit, gridCell.cell), lengthLimit };
+  }
+  next.set(unit.id, { unit, cells, search: computeSearch(unit, cells) });
+  return next;
+}
+function sortRows(data) {
+  return [...data.values()].sort((a, b) => compareText(a.unit.namespace, b.unit.namespace) || compareText(a.unit.key, b.unit.key));
+}
+function assetOf(unit) {
+  const origin = parseOrigin(unit.origin);
+  return origin.kind === "unknown" ? "" : origin.path;
+}
+function matchesPath(candidate, filter) {
+  return filter.endsWith("/") ? candidate.startsWith(filter) : candidate === filter;
+}
+function filterRows(rows, culture, filters) {
+  const needle = filters.q.trim().toLowerCase();
+  const { status: statusFilter, band: bandFilter, outdated: outdatedFilter, namespace: namespaceFilter, asset: assetFilter } = filters;
+  const results = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const gridCell = row.cells[culture];
+    if (statusFilter && ((gridCell == null ? void 0 : gridCell.cell.status) ?? "empty") !== statusFilter) continue;
+    const band = (gridCell == null ? void 0 : gridCell.cell.band) ?? "";
+    if (bandFilter === "none" && band !== "") continue;
+    if (bandFilter !== "" && bandFilter !== "none" && band !== bandFilter) continue;
+    if (outdatedFilter && !(gridCell == null ? void 0 : gridCell.outdated)) continue;
+    if (namespaceFilter && row.unit.namespace !== namespaceFilter) continue;
+    if (assetFilter && !matchesPath(assetOf(row.unit), assetFilter)) continue;
+    if (needle && !(row.search ?? computeSearch(row.unit, row.cells)).includes(needle)) continue;
+    results.push(row);
+  }
+  return results;
+}
+function facets(rows) {
+  const namespaces = /* @__PURE__ */ new Set();
+  for (const row of rows) namespaces.add(row.unit.namespace);
+  return { namespaces: [...namespaces].sort(compareText) };
+}
+function assetPathEntries(rows) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    const asset = assetOf(row.unit);
+    if (asset) counts.set(asset, (counts.get(asset) ?? 0) + 1);
+  }
+  return [...counts.entries()].map(([path, count]) => ({ path, count }));
+}
+function cellTone(gridCell) {
+  if (!gridCell || gridCell.cell.status === "empty") return "tone-empty";
+  if (gridCell.outdated) return "tone-outdated";
+  switch (gridCell.cell.status) {
+    case "approved":
+    case "edited":
+    case "human_edit":
+      return "tone-done";
+    case "needs_fix":
+    case "rejected":
+      return "tone-bad";
+    default:
+      return `tone-band-${gridCell.cell.band || "none"}`;
+  }
+}
+function statusChip(gridCell) {
+  const tone = cellTone(gridCell);
+  if (tone === "tone-empty") return void 0;
+  if (tone === "tone-outdated") return { label: "Outdated", tone };
+  if (tone === "tone-done") {
+    const label = gridCell.cell.status === "approved" ? "Approved" : gridCell.cell.status === "edited" ? "Edited" : "Human";
+    return { label, tone };
+  }
+  if (tone === "tone-bad") {
+    const label = gridCell.cell.status === "needs_fix" ? "Needs fix" : "Rejected";
+    return { label, tone };
+  }
+  return { label: "Draft", tone };
+}
+function liveEntries(rows, culture) {
+  return rows.flatMap((row) => {
+    var _a;
+    const cell = (_a = row.cells[culture]) == null ? void 0 : _a.cell;
+    if (!cell || cell.text.length === 0 || cell.status === "rejected" || cell.status === "needs_fix") return [];
+    return [{ namespace: row.unit.namespace, key: row.unit.key, source: row.unit.source, translation: cell.text }];
+  });
+}
+function exportStatus(row) {
+  return row.outdated ? "outdated" : row.cell.status;
+}
+function sameCulture(a, b) {
+  const normalize2 = (code) => code.trim().toLowerCase().replace(/_/g, "-");
+  return normalize2(a) === normalize2(b);
+}
+const EXCHANGE_CSV_COLUMNS = ["namespace", "key", "source", "translation", "status", "context", "notes", "max_length", "lochub_id", "lochub_revision"];
+const REQUIRED_COLUMNS_MESSAGE = 'The CSV needs a "translation" column and either "lochub_id" or both "namespace" and "key" (the header row LocHub exports).';
+const GUARDED_START = /* @__PURE__ */ new Set([...FORMULA_INJECTION_PREFIXES, "	"]);
+function guard(value) {
+  return GUARDED_START.has(value[0] ?? "") ? `	${value}` : value;
+}
+function unguard(value) {
+  return value[0] === "	" && GUARDED_START.has(value[1] ?? "") ? value.slice(1) : value;
+}
+function field(value) {
+  const guarded = guard(value);
+  return /[",\r\n]/.test(guarded) ? `"${guarded.replace(/"/g, '""')}"` : guarded;
+}
+function exchangeToCsv(rows) {
+  const lines = [EXCHANGE_CSV_COLUMNS.join(",")];
+  for (const row of rows) {
+    const limit = row.lengthLimit ?? null;
+    lines.push(
+      [
+        field(row.unit.namespace),
+        field(row.unit.key),
+        field(row.unit.source),
+        field(row.cell.text),
+        exportStatus(row),
+        field(row.unit.origin),
+        field(row.unit.devNotes),
+        limit === null ? "" : String(limit),
+        field(row.unit.id),
+        // Always written, including 0 for a string that was empty at export: the import's conflict check (the
+        // conflict rule) needs the revision to notice a LocHub write made after the export to a string that was
+        // empty then.
+        String(row.cell.revision)
+      ].join(",")
+    );
+  }
+  return lines.map((line) => `${line}\r
+`).join("");
+}
+function readExchangeCsv(text) {
+  var _a, _b;
+  const rows = parseCsv(text);
+  const headerRow = rows[0] ?? [];
+  const header = headerRow.map((name) => name.trim().toLowerCase());
+  const column = (name) => header.indexOf(name);
+  const translation = column("translation");
+  const id = column("lochub_id");
+  const namespace = column("namespace");
+  const key = column("key");
+  if (translation < 0 || id < 0 && (namespace < 0 || key < 0)) throw new Error(REQUIRED_COLUMNS_MESSAGE);
+  const source = column("source");
+  const status = column("status");
+  const revision = column("lochub_revision");
+  const known = new Set(EXCHANGE_CSV_COLUMNS);
+  const ignoredColumns = headerRow.filter((name, i) => name.trim() !== "" && !known.has(header[i])).map((name) => name.trim());
+  const entries = [];
+  const labels = [];
+  for (let r = 1; r < rows.length; r++) {
+    const cells = rows[r];
+    if (cells.every((value2) => value2.trim() === "")) continue;
+    const value = (index) => index < 0 ? void 0 : unguard(cells[index] ?? "");
+    const entry = { text: value(translation) ?? "", approved: (value(status) ?? "").trim().toLowerCase() === "approved" };
+    const unitId = (_a = value(id)) == null ? void 0 : _a.trim();
+    if (unitId) entry.unitId = unitId;
+    if (namespace >= 0 && key >= 0) {
+      entry.namespace = value(namespace) ?? "";
+      entry.key = value(key) ?? "";
+    }
+    const sourceText = value(source);
+    if (sourceText) entry.source = sourceText;
+    const exported = ((_b = value(revision)) == null ? void 0 : _b.trim()) ?? "";
+    if (/^\d+$/.test(exported)) entry.exportedRevision = Number(exported);
+    entries.push(entry);
+    labels.push(entry.key !== void 0 ? `Row ${r + 1}: ${entry.namespace}/${entry.key}` : `Row ${r + 1}`);
+  }
+  return { format: "csv", entries, labels, ignoredColumns, copyOfSource: entries.map(() => false) };
+}
+const ESCAPE$1 = "`";
+const ESCAPED_CHARS = /* @__PURE__ */ new Set(["`", "{", "}", "|"]);
+const TAG$1 = /<[\w.-]+(?:\s+[\w.-]+="[^"]*")*\s*\/?>/y;
+const MODIFIER_NAME = /[A-Za-z]+\(/y;
+function modifierEnd(text, start) {
+  let inQuotes = false;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (c === ESCAPE$1 && i + 1 < text.length) {
+      i++;
+      continue;
+    }
+    if (c === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (!inQuotes && c === ")") return i + 1;
+  }
+  return -1;
+}
+function splitInlineCodes(text) {
+  const parts = [];
+  let plain = "";
+  const code = (value) => {
+    if (plain) parts.push({ code: false, text: plain });
+    plain = "";
+    parts.push({ code: true, text: value });
+  };
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    const nextChar = text[i + 1];
+    if (c === ESCAPE$1 && nextChar && ESCAPED_CHARS.has(nextChar)) {
+      plain += text.slice(i, i + 2);
+      i += 2;
+      continue;
+    }
+    if (c === "{") {
+      const close = text.indexOf("}", i + 1);
+      if (close < 0) {
+        plain += text.slice(i);
+        break;
+      }
+      const after = close + 1;
+      if (text[after] === "|") {
+        MODIFIER_NAME.lastIndex = after + 1;
+        if (MODIFIER_NAME.test(text)) {
+          const end = modifierEnd(text, MODIFIER_NAME.lastIndex);
+          const stop = end < 0 ? text.length : end;
+          plain += text.slice(i, stop);
+          i = stop;
+          continue;
+        }
+      }
+      code(text.slice(i, after));
+      i = after;
+      continue;
+    }
+    if (c === "<") {
+      if (text.startsWith("</>", i)) {
+        code("</>");
+        i += 3;
+        continue;
+      }
+      TAG$1.lastIndex = i;
+      const tag = TAG$1.exec(text);
+      if (tag) {
+        code(tag[0]);
+        i += tag[0].length;
+        continue;
+      }
+    }
+    plain += c;
+    i++;
+  }
+  if (plain) parts.push({ code: false, text: plain });
+  return parts;
+}
+const XLIFF_NS = "urn:oasis:names:tc:xliff:document:1.2";
+const LOCHUB_NS = "urn:lochub:xliff";
+const XMLNS_NS = "http://www.w3.org/2000/xmlns/";
+const TARGET_STATE = {
+  ai_draft: "needs-review-translation",
+  needs_fix: "needs-review-translation",
+  edited: "translated",
+  human_edit: "translated",
+  approved: "final",
+  rejected: "needs-translation",
+  outdated: "needs-translation"
+};
+const XML_INVALID = new RegExp("[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F￾￿]|[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF])|(?<![\\uD800-\\uDBFF])[\\uDC00-\\uDFFF]");
+const CODE_ELEMENTS = /* @__PURE__ */ new Set(["ph", "x", "bx", "ex", "it", "bpt", "ept"]);
+const EMPTY_BY_ID = /* @__PURE__ */ new Set(["x", "bx", "ex"]);
+const COPY_SOURCE_STATES = /* @__PURE__ */ new Set(["new", "needs-translation"]);
+function element(doc, name, attributes = {}) {
+  const el = doc.createElementNS(XLIFF_NS, name);
+  for (const [attribute, value] of Object.entries(attributes)) el.setAttribute(attribute, value);
+  return el;
+}
+function appendSegment(doc, parent, text, sourceCodes) {
+  const codes = [];
+  const unused = sourceCodes ? [...sourceCodes] : [];
+  let nextId = sourceCodes ? sourceCodes.length : 0;
+  for (const part of splitInlineCodes(text)) {
+    if (!part.code) {
+      parent.appendChild(doc.createTextNode(part.text));
+      continue;
+    }
+    const match = unused.findIndex((code) => code.text === part.text);
+    const id = match >= 0 ? unused.splice(match, 1)[0].id : ++nextId;
+    const ph = element(doc, "ph", { id: String(id) });
+    ph.textContent = part.text;
+    parent.appendChild(ph);
+    codes.push({ id, text: part.text });
+  }
+  return codes;
+}
+function exchangeToXliff(rows, options) {
+  const broken = rows.filter((row) => [row.unit.source, row.cell.text, row.unit.devNotes, row.unit.origin].some((text) => XML_INVALID.test(text)));
+  if (broken.length > 0) {
+    const names = broken.slice(0, 5).map((row) => `${row.unit.namespace}/${row.unit.key}`).join(", ");
+    throw new Error(
+      `XLIFF cannot store the control characters in ${broken.length} string(s) (${names}${broken.length > 5 ? ", …" : ""}). Export CSV instead, or filter these strings out.`
+    );
+  }
+  const doc = document.implementation.createDocument(XLIFF_NS, "xliff", null);
+  const root2 = doc.documentElement;
+  root2.setAttribute("version", "1.2");
+  root2.setAttributeNS(XMLNS_NS, "xmlns:lochub", LOCHUB_NS);
+  const file = element(doc, "file", {
+    original: `LocHub/${options.culture}`,
+    "source-language": options.sourceCulture,
+    "target-language": options.culture,
+    datatype: "plaintext",
+    date: options.date
+  });
+  const body = element(doc, "body");
+  for (const row of rows) {
+    const status = exportStatus(row);
+    const unit = element(doc, "trans-unit", { id: row.unit.id, resname: `${row.unit.namespace}/${row.unit.key}` });
+    unit.setAttributeNS("http://www.w3.org/XML/1998/namespace", "xml:space", "preserve");
+    unit.setAttributeNS(LOCHUB_NS, "lochub:revision", String(row.cell.revision));
+    const limit = row.lengthLimit ?? null;
+    if (limit !== null) {
+      unit.setAttribute("maxwidth", String(limit));
+      unit.setAttribute("size-unit", "char");
+    }
+    if (status === "approved") unit.setAttribute("approved", "yes");
+    const source = element(doc, "source");
+    const codes = appendSegment(doc, source, row.unit.source, null);
+    unit.appendChild(source);
+    if (row.cell.text.length > 0) {
+      const target = element(doc, "target", { state: TARGET_STATE[status] ?? "needs-review-translation" });
+      appendSegment(doc, target, row.cell.text, codes);
+      unit.appendChild(target);
+    }
+    if (row.unit.devNotes) {
+      const developer = element(doc, "note", { from: "developer" });
+      developer.textContent = row.unit.devNotes;
+      unit.appendChild(developer);
+    }
+    const location = element(doc, "note", { from: "location" });
+    location.textContent = row.unit.origin;
+    unit.appendChild(location);
+    body.appendChild(doc.createTextNode("\n"));
+    body.appendChild(unit);
+  }
+  body.appendChild(doc.createTextNode("\n"));
+  file.appendChild(body);
+  root2.appendChild(file);
+  const xml = new XMLSerializer().serializeToString(doc).replace(/\r/g, "&#13;");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+${xml}
+`;
+}
+function childElement(parent, name) {
+  return Array.from(parent.children).find((child) => child.localName === name);
+}
+function descendants(parent, name) {
+  return Array.from(parent.getElementsByTagName("*")).filter((el) => el.localName === name);
+}
+function segmentText(node, sourceCodes) {
+  let out = "";
+  for (const child of Array.from(node.childNodes)) {
+    if (child.nodeType === Node.TEXT_NODE || child.nodeType === Node.CDATA_SECTION_NODE) out += child.nodeValue ?? "";
+    else if (child.nodeType === Node.ELEMENT_NODE) {
+      const el = child;
+      const inner = segmentText(el, sourceCodes);
+      out += inner === "" && EMPTY_BY_ID.has(el.localName) ? sourceCodes.get(el.getAttribute("id") ?? "") ?? "" : inner;
+    }
+  }
+  return out;
+}
+function codesById(source) {
+  const codes = /* @__PURE__ */ new Map();
+  for (const el of Array.from(source.getElementsByTagName("*"))) {
+    const id = el.getAttribute("id");
+    if (id !== null && CODE_ELEMENTS.has(el.localName) && !codes.has(id)) codes.set(id, segmentText(el, /* @__PURE__ */ new Map()));
+  }
+  return codes;
+}
+function readXliff(text, culture) {
+  const doc = new DOMParser().parseFromString(text, "application/xml");
+  if (doc.getElementsByTagName("parsererror").length > 0) throw new Error("The file is not valid XML, so it cannot be read as XLIFF.");
+  const root2 = doc.documentElement;
+  if (root2.localName !== "xliff") throw new Error("The file is not XLIFF (no <xliff> root element).");
+  const version = root2.getAttribute("version") ?? "";
+  if (version !== "" && !version.startsWith("1.")) throw new Error(`XLIFF ${version} is not supported. Export XLIFF 1.2 from your translation tool.`);
+  const entries = [];
+  const labels = [];
+  const copyOfSource = [];
+  for (const file of descendants(root2, "file")) {
+    const target = file.getAttribute("target-language");
+    if (target && !sameCulture(target, culture)) throw new Error(`This file is for ${target}, not ${culture}. Switch the Grid to ${target} or pick the ${culture} file.`);
+    const date = file.getAttribute("date");
+    const exportedAt = date && EXPORTED_AT_PATTERN.test(date) && !Number.isNaN(Date.parse(date)) ? date : void 0;
+    for (const unit of descendants(file, "trans-unit")) {
+      const sourceEl = childElement(unit, "source");
+      const targetEl = childElement(unit, "target");
+      const codes = sourceEl ? codesById(sourceEl) : /* @__PURE__ */ new Map();
+      const source = sourceEl ? segmentText(sourceEl, codes) : void 0;
+      let translation = targetEl ? segmentText(targetEl, codes) : "";
+      const isCopyOfSource = targetEl !== void 0 && translation === source && COPY_SOURCE_STATES.has(targetEl.getAttribute("state") ?? "");
+      if (isCopyOfSource) translation = "";
+      const entry = { text: translation, approved: unit.getAttribute("approved") === "yes" };
+      const id = unit.getAttribute("id");
+      if (id) entry.unitId = id;
+      if (source !== void 0) entry.source = source;
+      const revision = unit.getAttributeNS(LOCHUB_NS, "revision");
+      if (revision !== null && /^\d+$/.test(revision)) entry.exportedRevision = Number(revision);
+      if (exportedAt) entry.exportedAt = exportedAt;
+      entries.push(entry);
+      labels.push(unit.getAttribute("resname") || id || `Unit ${entries.length}`);
+      copyOfSource.push(isCopyOfSource);
+    }
+  }
+  return { format: "xliff", entries, labels, ignoredColumns: [], copyOfSource };
+}
+const TRANSLATION_FILE_ACCEPT = ".csv,.xlf,.xliff,.xml";
+function decodeXml(bytes) {
+  if (bytes[0] === 255 && bytes[1] === 254) return new TextDecoder("utf-16le").decode(bytes.subarray(2));
+  if (bytes[0] === 254 && bytes[1] === 255) return new TextDecoder("utf-16be").decode(bytes.subarray(2));
+  try {
+    return decodeUtf8(bytes);
+  } catch {
+    throw new Error("The file is neither UTF-8 nor UTF-16 text.");
+  }
+}
+function parseTranslationFile(name, bytes, culture) {
+  const extension = name.toLowerCase().split(".").pop() ?? "";
+  if (extension === "csv") return readExchangeCsv(decodeUtf8(bytes));
+  if (extension === "xlf" || extension === "xliff" || extension === "xml") {
+    const text = decodeXml(bytes);
+    if (extension === "xml" && !text.includes("<xliff")) throw new Error("This XML file is not XLIFF.");
+    return readXliff(text, culture);
+  }
+  throw new Error("Choose a .csv, .xlf, .xliff or .xml file.");
+}
+const REVIEWER_KEY = "lochub.reviewerName";
+const LIST_LIMIT = 200;
+const TRANSLATION_FILE_TYPES = "Translation files (*.csv;*.xlf;*.xliff;*.xml)|*.csv;*.xlf;*.xliff;*.xml|All files (*.*)|*.*";
+const SAVE_AS = {
+  csv: { extension: "csv", fileTypes: "CSV files (*.csv)|*.csv|All files (*.*)|*.*", mime: "text/csv;charset=utf-8" },
+  xliff: { extension: "xlf", fileTypes: "XLIFF files (*.xlf)|*.xlf|All files (*.*)|*.*", mime: "application/xliff+xml;charset=utf-8" }
+};
+const SKIPPED = /* @__PURE__ */ new Set(["stale", "unknown", "empty", "hard"]);
+const SKIP_REASON = {
+  stale: "the source text changed since the export",
+  unknown: "no such string in this project"
+};
+const EMPTY_REASON = "no translation in the file (an import never clears one)";
+const COPY_OF_SOURCE_REASON = "copy of the source (not translated)";
+function messages(row, severities) {
+  return (row.issues ?? []).filter((issue) => severities.includes(issue.severity)).map((issue) => issue.message).join("; ");
+}
+function isWarningRow(row) {
+  return messages(row, ["confirm"]) !== "" && messages(row, ["hard"]) === "" && !["unknown", "stale", "empty", "conflict"].includes(row.outcome);
+}
+function describeRow(row, label, copyOfSource) {
+  if (row.outcome === "hard") return `${label}: format problem: ${messages(row, ["hard"])}`;
+  if (row.outcome === "empty") return `${label}: ${copyOfSource ? COPY_OF_SOURCE_REASON : EMPTY_REASON}`;
+  const reason = SKIP_REASON[row.outcome];
+  if (reason) return `${label}: ${reason}`;
+  if (row.outcome === "unchanged") return label;
+  if (row.outcome === "confirm") return `${label}: ${messages(row, ["confirm"])}`;
+  const change = row.outcome === "approved" ? `approve "${row.after ?? ""}"` : `"${row.before || "(empty)"}" → "${row.after ?? ""}"`;
+  const approvedToo = row.outcome === "changed_approved" ? " (approved)" : "";
+  const notes = messages(row, ["confirm", "soft"]);
+  return `${label}: ${change}${approvedToo}${notes ? ` — ${notes}` : ""}`;
+}
+function groupsOf(result) {
+  const pick = (test) => result.rows.filter(test);
+  return [
+    { title: "Changed", rows: pick((row) => row.outcome === "changed" || row.outcome === "changed_approved") },
+    { title: "Approved", rows: pick((row) => row.outcome === "approved") },
+    { title: "Unchanged", rows: pick((row) => row.outcome === "unchanged") },
+    { title: "Skipped", rows: pick((row) => SKIPPED.has(row.outcome)) },
+    { title: "Conflicts", rows: pick((row) => row.outcome === "conflict") },
+    { title: "Needs confirmation", rows: pick((row) => row.outcome === "confirm") }
+  ];
+}
+function ExchangeActions({ api: api2, bridge, culture, cultures, nativeCulture, filtered, totalCount, onImported, now = () => /* @__PURE__ */ new Date() }) {
+  const [panel, setPanel] = reactExports.useState("none");
+  const [exportCulture, setExportCulture] = reactExports.useState(culture);
+  const [format, setFormat] = reactExports.useState("csv");
+  const [scope, setScope] = reactExports.useState("filtered");
+  const [preview, setPreview] = reactExports.useState(null);
+  const [reviewer, setReviewer] = reactExports.useState(loadReviewer);
+  const [busy, setBusy] = reactExports.useState(false);
+  const [notice, setNotice] = reactExports.useState("");
+  const [error, setError] = reactExports.useState("");
+  const request = (target, dryRun) => ({
+    culture,
+    actor: reviewer.trim(),
+    dryRun,
+    overwriteConflicts: target.overwriteConflicts,
+    acceptConfirm: target.acceptConfirm,
+    entries: target.parsed.entries
+  });
+  const close = () => {
+    setPanel("none");
+    setPreview(null);
+    setError("");
+  };
+  const openExport = () => {
+    setPanel("export");
+    setPreview(null);
+    setExportCulture(culture);
+    setError("");
+    setNotice("");
+  };
+  const runExport = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const exportedAt = now().toISOString();
+      const ids = new Set(filtered.map((row) => row.unit.id));
+      const all = await api2.allCells(exportCulture);
+      const rows = (scope === "all" ? all : all.filter((row) => ids.has(row.unit.id))).slice().sort((a, b) => compareText(a.unit.namespace, b.unit.namespace) || compareText(a.unit.key, b.unit.key));
+      if (rows.length === 0) {
+        setError("Nothing to export: no strings match.");
+        return;
+      }
+      const text = format === "csv" ? exchangeToCsv(rows) : exchangeToXliff(rows, { culture: exportCulture, sourceCulture: nativeCulture || "en", date: exportedAt });
+      const target = SAVE_AS[format];
+      const name = `lochub-${exportCulture}.${target.extension}`;
+      const saved = await saveTextFile(bridge, name, text, target.fileTypes, "Export translations", target.mime);
+      if (!saved) return;
+      setNotice(saved.path ? `Saved to ${saved.path}` : `Downloaded ${name}`);
+      setPanel("none");
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const startImport = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    setPanel("none");
+    setPreview(null);
+    try {
+      const picked = await pickTextFile(bridge, "Import translations", TRANSLATION_FILE_ACCEPT, TRANSLATION_FILE_TYPES);
+      if (!picked) return;
+      const parsed = parseTranslationFile(picked.name, picked.bytes, culture);
+      if (parsed.entries.length === 0) {
+        setError(`${picked.name} has no strings to import.`);
+        return;
+      }
+      const draft = { parsed, overwriteConflicts: false, acceptConfirm: false };
+      const result = await api2.importTranslations(request(draft, true));
+      setPreview({ fileName: picked.name, result, ...draft });
+      setPanel("import");
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const rerun = async (patch) => {
+    if (!preview || busy) return;
+    const next = { ...preview, ...patch };
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api2.importTranslations(request(next, true));
+      setPreview({ ...next, result });
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const applyImport = async () => {
+    if (!preview || busy || reviewer.trim() === "") return;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api2.importTranslations({ ...request(preview, false), previewDigest: preview.result.digest });
+      saveReviewer(reviewer.trim());
+      const applied = result.counts.changed + result.counts.changed_approved + result.counts.approved;
+      setNotice(`Imported ${applied} ${applied === 1 ? "string" : "strings"} into ${culture}.`);
+      setPreview(null);
+      setPanel("none");
+      onImported();
+    } catch (e) {
+      const staleResult = e instanceof ApiError && e.body.error === "preview_stale" ? e.body.result : void 0;
+      if (staleResult) {
+        setPreview({ ...preview, result: staleResult });
+        setError("Strings changed in LocHub since this preview. Check it again, then Import.");
+      } else {
+        setError(errorText(e));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+  const labelOf = (row) => (preview == null ? void 0 : preview.parsed.labels[row.index]) ?? `String ${row.index + 1}`;
+  const conflictCount = preview ? preview.result.rows.filter((row) => row.conflict).length : 0;
+  const warningCount = preview ? preview.result.rows.filter(isWarningRow).length : 0;
+  const applicable = preview ? preview.result.counts.changed + preview.result.counts.changed_approved + preview.result.counts.approved : 0;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", onClick: openExport, disabled: busy, children: "Export…" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", onClick: () => void startImport(), disabled: busy, children: "Import…" }),
+    notice && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "notice", role: "status", children: notice }),
+    error && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "error", role: "alert", children: error }),
+    panel === "export" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "import-preview exchange-panel", role: "dialog", "aria-label": "Export translations", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "Export translations" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { children: [
+        "Culture",
+        " ",
+        /* @__PURE__ */ jsxRuntimeExports.jsx("select", { "aria-label": "Export culture", value: exportCulture, onChange: (e) => setExportCulture(e.target.value), children: cultures.map((code) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: code, children: code }, code)) })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { children: [
+        "Format",
+        " ",
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("select", { "aria-label": "Export format", value: format, onChange: (e) => setFormat(e.target.value), children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "csv", children: "CSV (spreadsheets)" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "xliff", children: "XLIFF 1.2 (CAT tools)" })
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { children: [
+        "Strings",
+        " ",
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("select", { "aria-label": "Export scope", value: scope, onChange: (e) => setScope(e.target.value), children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "filtered", children: `Strings matching the current filters (${filtered.length})` }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "all", children: `All strings (${totalCount})` })
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "actions", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", className: "primary", onClick: () => void runExport(), disabled: busy, children: "Export" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", onClick: close, disabled: busy, children: "Cancel" })
+      ] })
+    ] }),
+    panel === "import" && preview && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "import-preview exchange-panel", role: "dialog", "aria-label": "Import translations", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: `Import into ${culture}` }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "muted", children: `${preview.fileName}: ${preview.parsed.entries.length} ${preview.parsed.entries.length === 1 ? "string" : "strings"} (${preview.parsed.format === "csv" ? "CSV" : "XLIFF"})` }),
+      groupsOf(preview.result).map((group) => /* @__PURE__ */ jsxRuntimeExports.jsxs("details", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("summary", { children: `${group.title} (${group.rows.length})` }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("ul", { children: [
+          group.rows.slice(0, LIST_LIMIT).map((row) => /* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: describeRow(row, labelOf(row), preview.parsed.copyOfSource[row.index] ?? false) }, row.index)),
+          group.rows.length > LIST_LIMIT && /* @__PURE__ */ jsxRuntimeExports.jsx("li", { className: "muted", children: `…and ${group.rows.length - LIST_LIMIT} more` })
+        ] })
+      ] }, group.title)),
+      preview.parsed.ignoredColumns.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "muted", children: `Ignored columns: ${preview.parsed.ignoredColumns.join(", ")}` }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { children: [
+        "Reviewer name",
+        " ",
+        /* @__PURE__ */ jsxRuntimeExports.jsx("input", { "aria-label": "Reviewer name", value: reviewer, maxLength: 64, onChange: (e) => setReviewer(e.target.value) })
+      ] }),
+      conflictCount > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("input", { type: "checkbox", checked: preview.overwriteConflicts, disabled: busy, onChange: (e) => void rerun({ overwriteConflicts: e.target.checked }) }),
+        ` Overwrite conflicts (${conflictCount})`
+      ] }),
+      warningCount > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("input", { type: "checkbox", checked: preview.acceptConfirm, disabled: busy, onChange: (e) => void rerun({ acceptConfirm: e.target.checked }) }),
+        ` Import anyway: ${warningCount} ${warningCount === 1 ? "string" : "strings"} with warnings`
+      ] }),
+      reviewer.trim() === "" && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "muted", children: "Enter your name: it is recorded as the reviewer of every imported string." }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "actions", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", className: "primary", onClick: () => void applyImport(), disabled: busy || reviewer.trim() === "" || applicable === 0, children: "Import" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", onClick: close, disabled: busy, children: "Cancel" })
+      ] })
+    ] })
+  ] });
+}
+function loadReviewer() {
+  try {
+    return localStorage.getItem(REVIEWER_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+function saveReviewer(name) {
+  try {
+    localStorage.setItem(REVIEWER_KEY, name);
+  } catch {
+  }
+}
 const MAX_SUGGESTIONS = 50;
 function folderPrefixesOf(path) {
   const prefixes = [];
@@ -1076,189 +1859,6 @@ function PathFilter({ value, onChange, entries, ariaLabel, placeholder }) {
       }
     )
   ] });
-}
-function emptyCell(unitId, culture) {
-  return {
-    unitId,
-    culture,
-    text: "",
-    status: "empty",
-    basedOnSourceRev: 0,
-    basedOnSource: "",
-    provenance: "",
-    ambiguity: "none",
-    alts: [],
-    question: "",
-    note: "",
-    suggestion: "",
-    judgeIssues: [],
-    qaFlags: [],
-    band: "",
-    archiveHash: "",
-    revision: 0
-  };
-}
-function isOutdated(unit, cell) {
-  return cell.status !== "empty" && cell.text.length > 0 && cell.basedOnSourceRev < unit.sourceRev;
-}
-const LINE_SUFFIX = /(?:\((\d+)\)|:(\d+))$/;
-const FILE_EXTENSION = /\.(c|cc|cpp|cs|csv|h|hpp|inl|ini|json|py|rml|txt)$/i;
-function parseOrigin(origin) {
-  let path = origin.trim().replaceAll("\\", "/");
-  let line = 0;
-  const suffix = LINE_SUFFIX.exec(path);
-  if (suffix && suffix.index > 1) {
-    line = Number(suffix[1] ?? suffix[2]);
-    path = path.slice(0, suffix.index);
-  }
-  if (path.length === 0) return { kind: "unknown", path: "", line: 0 };
-  if (path.startsWith("/") && !FILE_EXTENSION.test(path)) {
-    if (path.startsWith("/Script/")) return { kind: "unknown", path, line: 0 };
-    return { kind: "asset", path: path.split(".")[0] ?? path, line: 0 };
-  }
-  return { kind: "file", path: path.replace(/^\/+/, ""), line };
-}
-function originLabel(origin) {
-  return origin.kind === "file" && origin.line > 0 ? `${origin.path}:${origin.line}` : origin.path;
-}
-function describeOrigin(origin) {
-  const parsed = parseOrigin(origin);
-  if (parsed.kind !== "asset") return { ...parsed, member: "" };
-  const normalized = origin.trim().replaceAll("\\", "/");
-  const prefix = `${parsed.path}.`;
-  return { ...parsed, member: normalized.startsWith(prefix) ? normalized.slice(prefix.length) : "" };
-}
-const NO_FILTERS = { q: "", status: "", band: "", outdated: false, namespace: "", asset: "" };
-function compareText(a, b) {
-  if (a < b) return -1;
-  if (a > b) return 1;
-  return 0;
-}
-function computeSearch(unit, cells) {
-  return [unit.key, unit.source, ...Object.values(cells).map((c) => c.cell.text)].join(" ").toLowerCase();
-}
-function mergeCulture(data, culture, rows) {
-  const next = new Map(data);
-  for (const { unit, cell, outdated } of rows) {
-    const existing = next.get(unit.id);
-    const cells = { ...(existing == null ? void 0 : existing.cells) ?? {}, [culture]: { cell, outdated } };
-    if (existing !== void 0 && (existing.unit.sourceRev !== unit.sourceRev || existing.unit.source !== unit.source)) {
-      const refreshedCells = {};
-      for (const [c, gridCell] of Object.entries(cells)) refreshedCells[c] = { cell: gridCell.cell, outdated: isOutdated(unit, gridCell.cell) };
-      next.set(unit.id, { unit, cells: refreshedCells, search: computeSearch(unit, refreshedCells) });
-      continue;
-    }
-    const base = (existing == null ? void 0 : existing.search) ?? `${unit.key} ${unit.source}`.toLowerCase();
-    next.set(unit.id, { unit, cells, search: `${base} ${cell.text.toLowerCase()}` });
-  }
-  return next;
-}
-function dropCultures(data, cultures) {
-  if (cultures.length === 0) return data;
-  const next = new Map(data);
-  for (const [id, row] of next) {
-    if (!cultures.some((c) => c in row.cells)) continue;
-    const cells = { ...row.cells };
-    for (const c of cultures) delete cells[c];
-    next.set(id, { ...row, cells, search: computeSearch(row.unit, cells) });
-  }
-  return next;
-}
-function withCell(data, cell) {
-  const row = data.get(cell.unitId);
-  if (!row) return data;
-  const next = new Map(data);
-  const cells = { ...row.cells, [cell.culture]: { cell, outdated: isOutdated(row.unit, cell) } };
-  next.set(cell.unitId, { ...row, cells, search: computeSearch(row.unit, cells) });
-  return next;
-}
-function withUnit(data, unit) {
-  const row = data.get(unit.id);
-  if (!row) return data;
-  const next = new Map(data);
-  const cells = {};
-  for (const [culture, gridCell] of Object.entries(row.cells)) cells[culture] = { cell: gridCell.cell, outdated: isOutdated(unit, gridCell.cell) };
-  next.set(unit.id, { unit, cells, search: computeSearch(unit, cells) });
-  return next;
-}
-function sortRows(data) {
-  return [...data.values()].sort((a, b) => compareText(a.unit.namespace, b.unit.namespace) || compareText(a.unit.key, b.unit.key));
-}
-function assetOf(unit) {
-  const origin = parseOrigin(unit.origin);
-  return origin.kind === "unknown" ? "" : origin.path;
-}
-function matchesPath(candidate, filter) {
-  return filter.endsWith("/") ? candidate.startsWith(filter) : candidate === filter;
-}
-function filterRows(rows, culture, filters) {
-  const needle = filters.q.trim().toLowerCase();
-  const { status: statusFilter, band: bandFilter, outdated: outdatedFilter, namespace: namespaceFilter, asset: assetFilter } = filters;
-  const results = [];
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
-    const gridCell = row.cells[culture];
-    if (statusFilter && ((gridCell == null ? void 0 : gridCell.cell.status) ?? "empty") !== statusFilter) continue;
-    const band = (gridCell == null ? void 0 : gridCell.cell.band) ?? "";
-    if (bandFilter === "none" && band !== "") continue;
-    if (bandFilter !== "" && bandFilter !== "none" && band !== bandFilter) continue;
-    if (outdatedFilter && !(gridCell == null ? void 0 : gridCell.outdated)) continue;
-    if (namespaceFilter && row.unit.namespace !== namespaceFilter) continue;
-    if (assetFilter && !matchesPath(assetOf(row.unit), assetFilter)) continue;
-    if (needle && !(row.search ?? computeSearch(row.unit, row.cells)).includes(needle)) continue;
-    results.push(row);
-  }
-  return results;
-}
-function facets(rows) {
-  const namespaces = /* @__PURE__ */ new Set();
-  for (const row of rows) namespaces.add(row.unit.namespace);
-  return { namespaces: [...namespaces].sort(compareText) };
-}
-function assetPathEntries(rows) {
-  const counts = /* @__PURE__ */ new Map();
-  for (const row of rows) {
-    const asset = assetOf(row.unit);
-    if (asset) counts.set(asset, (counts.get(asset) ?? 0) + 1);
-  }
-  return [...counts.entries()].map(([path, count]) => ({ path, count }));
-}
-function cellTone(gridCell) {
-  if (!gridCell || gridCell.cell.status === "empty") return "tone-empty";
-  if (gridCell.outdated) return "tone-outdated";
-  switch (gridCell.cell.status) {
-    case "approved":
-    case "edited":
-    case "human_edit":
-      return "tone-done";
-    case "needs_fix":
-    case "rejected":
-      return "tone-bad";
-    default:
-      return `tone-band-${gridCell.cell.band || "none"}`;
-  }
-}
-function statusChip(gridCell) {
-  const tone = cellTone(gridCell);
-  if (tone === "tone-empty") return void 0;
-  if (tone === "tone-outdated") return { label: "Outdated", tone };
-  if (tone === "tone-done") {
-    const label = gridCell.cell.status === "approved" ? "Approved" : gridCell.cell.status === "edited" ? "Edited" : "Human";
-    return { label, tone };
-  }
-  if (tone === "tone-bad") {
-    const label = gridCell.cell.status === "needs_fix" ? "Needs fix" : "Rejected";
-    return { label, tone };
-  }
-  return { label: "Draft", tone };
-}
-function liveEntries(rows, culture) {
-  return rows.flatMap((row) => {
-    var _a;
-    const cell = (_a = row.cells[culture]) == null ? void 0 : _a.cell;
-    if (!cell || cell.text.length === 0 || cell.status === "rejected" || cell.status === "needs_fix") return [];
-    return [{ namespace: row.unit.namespace, key: row.unit.key, source: row.unit.source, translation: cell.text }];
-  });
 }
 function OriginActions({ unit, bridge, editorConnected, onBeforeAction, onError, openLabel, showPath = true }) {
   const origin = parseOrigin(unit.origin);
@@ -1518,7 +2118,8 @@ function GridView({
   editorConnected,
   scrollMemory,
   loadedCultures,
-  loading
+  loading,
+  toolbarExtra
 }) {
   var _a;
   const isLoaded = (c) => loadedCultures.includes(c);
@@ -1624,7 +2225,8 @@ function GridView({
         culture,
         " live"
       ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(ColumnsPicker, { cultures, visible, active: culture, onVisible })
+      /* @__PURE__ */ jsxRuntimeExports.jsx(ColumnsPicker, { cultures, visible, active: culture, onVisible }),
+      toolbarExtra == null ? void 0 : toolbarExtra(filtered)
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { ref: scrollRef, className: "grid-scroll", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "grid-header", style: { gridTemplateColumns: columns, minWidth }, children: [
@@ -1809,6 +2411,10 @@ const PHASE_LABELS = {
   judge: "Checking",
   write: "Writing"
 };
+function noDollarsNote(billing, estimate) {
+  if (billing === "subscription") return "uses your Claude subscription limits";
+  return estimate.pricesUnset ? "no price set" : "price unknown for this model";
+}
 function JobProgressBar({ progress: { phase, done, total } }) {
   const label = total === 0 ? `${PHASE_LABELS[phase]}…` : `${PHASE_LABELS[phase]} · ${done} / ${total} strings`;
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "job-progress", children: [
@@ -2052,8 +2658,9 @@ function JobsView({ api: api2, culture, rows = [], billing = "api", aiReady = tr
         estimate.outputTokens.toLocaleString("en-US"),
         " output tokens ·",
         " ",
-        billing === "subscription" ? "uses your Claude subscription limits" : "price unknown for this model"
+        noDollarsNote(billing, estimate)
       ] }),
+      estimate.pricesUnset && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "muted", children: "Custom endpoint prices are 0 in Project Settings; Max USD cannot limit spending." }),
       estimate.approximate && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "muted", children: "≈ Approximate: token counts are estimated from text length; the job report shows the real usage." }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", onClick: () => void start(), disabled: running || starting || !aiReady, title: aiReady ? void 0 : aiDetail, children: "Run" })
     ] }),
@@ -2257,6 +2864,162 @@ function SummaryView({ api: api2, culture }) {
     /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: miss === void 0 ? "Blind audit: no sampled green strings reviewed yet." : `Blind audit: ${summary.audit.corrected} of ${summary.audit.sampled} sampled green strings were corrected, triage miss rate ${percent(summary.audit.corrected, summary.audit.sampled)}.` })
   ] });
 }
+const ESCAPE = "`";
+function readModifier(s, start) {
+  const match = /^[A-Za-z]+/.exec(s.slice(start));
+  if (!match) return void 0;
+  let i = start + match[0].length;
+  if (s[i] !== "(") return void 0;
+  const bodyStart = i + 1;
+  let inQuotes = false;
+  for (i = bodyStart; i < s.length; i++) {
+    const c = s[i];
+    if (c === ESCAPE) {
+      i++;
+      continue;
+    }
+    if (c === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (inQuotes) continue;
+    if (c === ")") return { name: match[0], body: s.slice(bodyStart, i), end: i + 1 };
+  }
+  return void 0;
+}
+function parseModifier(arg, name, body) {
+  const lower = name.toLowerCase();
+  const kind = lower === "plural" || lower === "ordinal" || lower === "gender" || lower === "hpp" ? lower : "other";
+  const forms = {};
+  const positional = [];
+  for (const part of splitTopLevel(body)) {
+    const eq = kind === "plural" || kind === "ordinal" ? part.indexOf("=") : -1;
+    if (eq > 0) forms[part.slice(0, eq).trim()] = unquote(part.slice(eq + 1).trim());
+    else positional.push(unquote(part.trim()));
+  }
+  return { arg, kind, name, forms, positional };
+}
+function splitTopLevel(body) {
+  const parts = [];
+  let braces = 0;
+  let parens = 0;
+  let inQuotes = false;
+  let current = "";
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === ESCAPE && i + 1 < body.length) {
+      current += c + body[i + 1];
+      i++;
+      continue;
+    }
+    if (c === '"') {
+      inQuotes = !inQuotes;
+    } else if (!inQuotes) {
+      if (c === "{") braces++;
+      else if (c === "}") braces--;
+      else if (c === "(") parens++;
+      else if (c === ")") parens--;
+      else if (c === "," && braces === 0 && parens === 0) {
+        parts.push(current);
+        current = "";
+        continue;
+      }
+    }
+    current += c;
+  }
+  if (current.trim().length > 0 || parts.length > 0) parts.push(current);
+  return parts;
+}
+function unquote(value) {
+  return value.length >= 2 && value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : value;
+}
+const ESCAPABLE = /* @__PURE__ */ new Set(["`", "{", "}", "|"]);
+const TAG = /<(?:\/|[\w.-]+(?:\s+[\w.-]+="[^"]*")*\s*\/?)>/y;
+const NONSPACING_MARK = /^[\p{Mn}\p{Me}]$/u;
+const ZERO_WIDTH = /^[\u200B\u200C\u200D\uFEFF]$/;
+const WIDE = [
+  [4352, 4447],
+  // Hangul Jamo initial consonants
+  [11904, 12350],
+  // CJK and Kangxi radicals, ideographic description, CJK symbols and punctuation
+  [12353, 13311],
+  // Hiragana, Katakana, Bopomofo, Hangul compatibility Jamo, Kanbun, CJK strokes, enclosed CJK
+  [13312, 19903],
+  // CJK unified ideographs extension A
+  [19968, 40959],
+  // CJK unified ideographs
+  [43360, 43391],
+  // Hangul Jamo extended-A
+  [44032, 55203],
+  // Hangul syllables
+  [63744, 64255],
+  // CJK compatibility ideographs
+  [65072, 65103],
+  // CJK compatibility forms
+  [65280, 65376],
+  // Fullwidth forms
+  [65504, 65510],
+  // Fullwidth signs
+  [127744, 128591],
+  // Emoji: misc symbols and pictographs, emoticons
+  [129280, 129535],
+  // Emoji: supplemental symbols and pictographs
+  [131072, 262141]
+  // CJK unified ideographs extension B and later
+];
+function codePointWidth(codePoint) {
+  const char = String.fromCodePoint(codePoint);
+  if (NONSPACING_MARK.test(char) || ZERO_WIDTH.test(char)) return 0;
+  return WIDE.some(([first, last]) => codePoint >= first && codePoint <= last) ? 2 : 1;
+}
+const ENTITIES = ["&amp;", "&lt;", "&gt;", "&quot;"];
+function visibleLength(text) {
+  let length = 0;
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === "`" && i + 1 < text.length && ESCAPABLE.has(text[i + 1])) {
+      length += 1;
+      i += 2;
+      continue;
+    }
+    if (c === "&") {
+      const entity = ENTITIES.find((e) => text.startsWith(e, i));
+      if (entity) {
+        length += 1;
+        i += entity.length;
+        continue;
+      }
+    }
+    if (c === "<") {
+      TAG.lastIndex = i;
+      const tag = TAG.exec(text);
+      if (tag) {
+        i += tag[0].length;
+        continue;
+      }
+    }
+    if (c === "{") {
+      const end = text.indexOf("}", i + 1);
+      if (end >= 0) {
+        const modifier = text[end + 1] === "|" ? readModifier(text, end + 2) : void 0;
+        const parsed = modifier ? parseModifier(text.slice(i + 1, end).trim(), modifier.name, modifier.body) : void 0;
+        if (modifier && parsed && parsed.kind !== "other" && parsed.name === parsed.kind) {
+          const branches = [...Object.values(parsed.forms), ...parsed.positional];
+          length += Math.max(0, ...branches.map((branch) => visibleLength(branch)));
+          i = modifier.end;
+        } else {
+          i = end + 1;
+        }
+        continue;
+      }
+    }
+    const codePoint = text.codePointAt(i);
+    length += codePointWidth(codePoint);
+    i += codePoint > 65535 ? 2 : 1;
+  }
+  return length;
+}
 function formatArgs(source) {
   const names = /* @__PURE__ */ new Set();
   for (const match of source.matchAll(new RegExp("(?<!`)\\{([^{}|`]+)\\}", "g"))) {
@@ -2277,6 +3040,7 @@ const CHECK_DEBOUNCE_MS = 300;
 const FIX_PROBLEMS_TITLE = "Fix the problems above first";
 const CONFIRM_LINE = "Unreal accepts this text, but it looks wrong. Approve anyway if it is intended.";
 const CHECK_WARNINGS_NOTICE = "Check the warnings, then click Approve anyway.";
+const LENGTH_COUNTER_TITLE = "Visible characters / Length Check limit";
 function historyVerb(event) {
   if (!event.accepted || event.accepted.length === 0) return event.action;
   return `${event.action === "approve" ? "approved" : "saved"} anyway (${event.accepted.join(", ")})`;
@@ -2301,6 +3065,8 @@ function CellPanel({ api: api2, bridge, row, culture, editorConnected, neighbors
   const route = bridge.route(editorConnected);
   const origin = parseOrigin(unit.origin);
   const args = formatArgs(unit.source);
+  const lengthLimit = (gridCell == null ? void 0 : gridCell.lengthLimit) ?? null;
+  const draftLength = visibleLength(draft);
   const loadHistory = reactExports.useCallback(() => {
     api2.history(culture, unit.id).then(setHistory, (e) => setError(errorText(e)));
   }, [api2, culture, unit.id]);
@@ -2458,7 +3224,12 @@ function CellPanel({ api: api2, bridge, row, culture, editorConnected, neighbors
         ")"
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("textarea", { ref: editRef, "aria-label": "Translation", rows: 3, value: draft, onChange: (e) => setDraft(e.target.value) }),
-      listedIssues.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { className: "issues", children: listedIssues.map((issue, index) => /* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: issue.message }, index)) }),
+      lengthLimit !== null && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: draftLength > lengthLimit ? "length-counter over" : "length-counter", title: LENGTH_COUNTER_TITLE, children: `${draftLength}/${lengthLimit}` }),
+      listedIssues.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { className: "issues", children: listedIssues.map((issue, index) => (
+        // A soft issue (e.g. a Warning-level too_long, or "Translation is identical to the source") is a
+        // hint that blocks nothing; only a hard issue is the blocking-error red the list defaults to (M-2).
+        /* @__PURE__ */ jsxRuntimeExports.jsx("li", { className: issue.severity === "soft" ? "soft" : void 0, children: issue.message }, index)
+      )) }),
       needsConfirm && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "confirm-issues", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: CONFIRM_LINE }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { className: "issues confirm", children: confirmIssues.map((issue, index) => /* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: issue.message }, index)) })
@@ -2593,10 +3364,10 @@ function queueAction(event, inTextField) {
   if (inTextField || event.ctrlKey || event.metaKey || event.altKey) return void 0;
   return KEYMAP[event.key.toLowerCase()];
 }
-function isTextField(element) {
-  if (!element) return false;
-  const tag = element.tagName;
-  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || element.isContentEditable === true;
+function isTextField(element2) {
+  if (!element2) return false;
+  const tag = element2.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || element2.isContentEditable === true;
 }
 const IN_REVIEW = /* @__PURE__ */ new Set(["ai_draft", "needs_fix"]);
 const BAND_RANK = { R: 1, Y: 2, G: 3 };
@@ -2754,14 +3525,37 @@ function editorStatus(health, route) {
   if (route === "relay") return "Editor: connected";
   return "Editor: offline";
 }
-const AI_PROVIDER_LABEL = { anthropic: "Anthropic", openai: "OpenAI", xai: "xAI", deepseek: "DeepSeek", gemini: "Gemini" };
+const AI_PROVIDER_LABEL = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  xai: "xAI",
+  deepseek: "DeepSeek",
+  gemini: "Gemini",
+  custom: "Custom"
+};
+const ENDPOINT_STATUS_LABEL = {
+  checking: "checking endpoint…",
+  ok: "endpoint OK",
+  model_missing: "model missing",
+  unreachable: "unreachable",
+  unknown: "no model list"
+};
+function aiBadgeTone(ready, endpoint) {
+  if ((endpoint == null ? void 0 : endpoint.status) === "unreachable") return " endpoint-error";
+  if (!ready || (endpoint == null ? void 0 : endpoint.status) === "model_missing") return " warning";
+  return "";
+}
 function AiBadge({ health }) {
   if (!health) return null;
   const ai = health.ai;
   if (!ai) return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "ai-status", children: "AI: Anthropic" });
   const isCurrentShape = typeof ai.provider === "string" && ai.provider in AI_PROVIDER_LABEL;
-  const label = isCurrentShape ? `AI: ${AI_PROVIDER_LABEL[ai.provider]}${ai.auth === "subscription" ? " (subscription)" : ""} · ${ai.translateModel} / ${ai.judgeModel}` : "AI: Anthropic";
-  return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `ai-status${ai.ready ? "" : " warning"}`, title: ai.ready ? "" : ai.detail, children: label });
+  const endpoint = isCurrentShape ? ai.endpoint : void 0;
+  const host = endpoint ? ` (${endpoint.url.replace(/^https?:\/\//, "")})` : "";
+  const probe = endpoint ? ` · ${ENDPOINT_STATUS_LABEL[endpoint.status] ?? endpoint.status}` : "";
+  const label = isCurrentShape ? `AI: ${AI_PROVIDER_LABEL[ai.provider]}${ai.auth === "subscription" ? " (subscription)" : ""}${host} · ${ai.translateModel} / ${ai.judgeModel}${probe}` : "AI: Anthropic";
+  const title = ai.ready ? (endpoint == null ? void 0 : endpoint.detail) ?? "" : ai.detail;
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `ai-status${aiBadgeTone(ai.ready, endpoint)}`, title, children: label });
 }
 const THEME_KEY = "lochub.theme";
 function currentTheme() {
@@ -2816,7 +3610,7 @@ function SyncResultPanel({ outcome, onDismiss }) {
   ] });
 }
 function App({ api: api2, bridge, healthMs = 5e3 }) {
-  var _a, _b, _c;
+  var _a, _b, _c, _d;
   const [view, navigate] = useView();
   const [meta, setMeta] = reactExports.useState({ nativeCulture: "", cultures: [] });
   const [chosenCulture, setChosenCulture] = reactExports.useState("");
@@ -2861,6 +3655,16 @@ function App({ api: api2, bridge, healthMs = 5e3 }) {
     }
     lastJobsFinished.current = seen;
   }, [health == null ? void 0 : health.jobsFinished, reload]);
+  const lastLengthArgs = reactExports.useRef(void 0);
+  reactExports.useEffect(() => {
+    var _a2;
+    const seen = (_a2 = health == null ? void 0 : health.ai) == null ? void 0 : _a2.lengthArgs;
+    if (seen === void 0) return;
+    if (lastLengthArgs.current !== void 0 && seen !== lastLengthArgs.current) {
+      void reload();
+    }
+    lastLengthArgs.current = seen;
+  }, [(_a = health == null ? void 0 : health.ai) == null ? void 0 : _a.lengthArgs, reload]);
   const loadMeta = reactExports.useCallback(() => {
     return api2.meta().then(setMeta, (e) => setError(errorText(e)));
   }, [api2]);
@@ -2947,9 +3751,9 @@ function App({ api: api2, bridge, healthMs = 5e3 }) {
         api: api2,
         culture,
         rows: grid.rows,
-        billing: ((_a = health == null ? void 0 : health.ai) == null ? void 0 : _a.auth) === "subscription" ? "subscription" : "api",
-        aiReady: ((_b = health == null ? void 0 : health.ai) == null ? void 0 : _b.ready) ?? true,
-        aiDetail: ((_c = health == null ? void 0 : health.ai) == null ? void 0 : _c.detail) ?? "",
+        billing: ((_b = health == null ? void 0 : health.ai) == null ? void 0 : _b.auth) === "subscription" ? "subscription" : "api",
+        aiReady: ((_c = health == null ? void 0 : health.ai) == null ? void 0 : _c.ready) ?? true,
+        aiDetail: ((_d = health == null ? void 0 : health.ai) == null ? void 0 : _d.detail) ?? "",
         preset: jobPreset,
         onJobDone
       }
@@ -2979,7 +3783,24 @@ function App({ api: api2, bridge, healthMs = 5e3 }) {
         editorConnected,
         scrollMemory: gridScroll.current,
         loadedCultures: grid.loadedCultures,
-        loading: grid.loading
+        loading: grid.loading,
+        toolbarExtra: (filtered) => (
+          // Keyed by culture: switching culture closes an open preview instead of importing into the new culture.
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            ExchangeActions,
+            {
+              api: api2,
+              bridge,
+              culture,
+              cultures,
+              nativeCulture: meta.nativeCulture,
+              filtered,
+              totalCount: grid.rows.length,
+              onImported: () => void reload()
+            },
+            culture
+          )
+        )
       }
     );
   }

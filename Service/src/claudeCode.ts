@@ -180,6 +180,8 @@ export class ClaudeCodeLlmClient implements LlmClient {
     mkdirSync(this.promptsDir, { recursive: true });
   }
 
+  // Ignores LlmClient.runSync's shouldContinue (see there): a timed-out `claude` child is reported as an ordinary
+  // retryable error, not a timeout the job probes on.
   async runSync(requests: LlmRequest[], concurrency: number, onOutcome?: (outcome: LlmOutcome) => void): Promise<LlmOutcome[]> {
     const out = new Array<LlmOutcome>(requests.length);
     let next = 0;

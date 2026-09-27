@@ -1,11 +1,16 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { LlmClient, LlmOutcome, LlmRequest } from '../src/llm.js';
+import { runPool } from '../src/llmShared.js';
 
 export interface FakeLlmClientOptions {
   // Overrides the default countInputTokens behavior (always resolves to 1000). Can reject — a script that
   // wants to prove the caller's rate-limit/hard-error handling throws from here, the same way the real SDK's
   // client.messages.countTokens would reject after its own retries are exhausted.
   countInputTokens?: (params: Anthropic.MessageCreateParamsNonStreaming) => Promise<number>;
+  // Runs runSync through the real runPool (llmShared.ts) at the caller's concurrency, honoring shouldContinue the
+  // way the fetch-based adapters do: a declined request never reaches respond or `calls`. Without it, every
+  // request is answered in order and shouldContinue is ignored (like the Anthropic adapter).
+  pool?: boolean;
 }
 
 // Scripted LLM for tests: the respond callback sees every request and returns its outcome.
@@ -18,13 +23,29 @@ export class FakeLlmClient implements LlmClient {
   // (estimate-speed-brief.md §1) actually overlaps calls instead of running them one at a time.
   maxConcurrentCountInputTokens = 0;
   private inFlightCountInputTokens = 0;
+  // Pool mode only: every outcome runSync returned, 'skipped' ones included (onOutcome never sees those).
+  readonly returned: LlmOutcome[] = [];
 
   constructor(
     private readonly respond: (request: LlmRequest) => LlmOutcome,
     private readonly options: FakeLlmClientOptions = {},
   ) {}
 
-  async runSync(requests: LlmRequest[], _concurrency?: number, onOutcome?: (outcome: LlmOutcome) => void): Promise<LlmOutcome[]> {
+  async runSync(
+    requests: LlmRequest[],
+    concurrency = 1,
+    onOutcome?: (outcome: LlmOutcome) => void,
+    shouldContinue?: () => boolean,
+  ): Promise<LlmOutcome[]> {
+    if (this.options.pool) {
+      const runOne = async (request: LlmRequest) => {
+        this.calls.push(request);
+        return this.respond(request);
+      };
+      const out = await runPool(requests, concurrency, runOne, onOutcome, shouldContinue);
+      this.returned.push(...out);
+      return out;
+    }
     this.calls.push(...requests);
     return requests.map((r) => {
       const outcome = this.respond(r);

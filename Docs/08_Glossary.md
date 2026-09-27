@@ -109,6 +109,6 @@ are kept and the failure is reported rather than silently discarded.
 > **Note:** Import is blocked — "Save your glossary changes before importing." — whenever the on-screen term list
 > differs from the last saved one for the active culture. Save (or discard) your edits first.
 
-![Glossary](images/08_glossary.png)
+![Glossary](images/17_glossary.png)
 
-![CSV import preview](images/08_csv_import_preview.png)
+![CSV import preview](images/18_glossary_csv_import.png)

@@ -1541,4 +1541,64 @@ bool FLocHubServiceMayStopAdoptedPidTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FLocHubLengthCheckRearmsRestartTest,
+	"LocHub.LengthCheck.RearmsRestart",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FLocHubLengthCheckRearmsRestartTest::RunTest(const FString& Parameters)
+{
+	using namespace LocHubServiceTestsPrivate;
+
+	// Same setup as FLocHubServiceKeyOnlyChangeRearmsRestartTest: earn a real bAiRestartTried == true through an actual
+	// mismatch restart, then prove a Length-Check-only Config change re-arms it too, isolated from every other field.
+	const FString TempDir = LocHubTests::MakeTempDir();
+	const FString ProjectDir = TempDir.LeftChop(1);
+	const uint32 NodePid = FPlatformProcess::GetCurrentProcessId();
+	const uint32 DeadHostPid = NodePid + 1;
+
+	const TSharedRef<FLocHubFakeService> Fake = MakeShared<FLocHubFakeService>(LocHubTests::FakeServicePort, ProjectDir);
+	if (!TestTrue(TEXT("Fake service is bound"), Fake->IsBound()))
+	{
+		return false;
+	}
+	Fake->SetResponse(TEXT("/api/health"), 200, BuildAiMismatchHealthBody(NodePid, ProjectDir, false));
+
+	FLocHubServiceProcess::FConfig Config = MakeTestConfig(TempDir, LocHubTests::FakeServicePort, true);
+	Config.Provider = TEXT("deepseek");
+	Config.Auth = TEXT("api");
+	Config.TranslateModel = TEXT("deepseek-v4-pro");
+	Config.JudgeModel = TEXT("deepseek-flash");
+	const TSharedRef<FLocHubServiceProcess> Service = MakeShared<FLocHubServiceProcess>(Config);
+	IFileManager::Get().MakeDirectory(*Service->GetConfig().StateDir, true);
+	TestTrue(TEXT("Pid file written"), FFileHelper::SaveStringToFile(FString::Printf(TEXT("%u %u"), NodePid, DeadHostPid), *Service->GetPidFilePath()));
+	Service->IsPidRunningFn = [](uint32) { return false; };
+	const TSharedRef<TArray<uint32>> Terminated = MakeShared<TArray<uint32>>();
+	Service->TerminateProcessFn = [Terminated](FProcHandle&, const uint32 InPid) { Terminated->Add(InPid); };
+
+	const TSharedRef<LocHubTests::FAsyncOutcome> Outcome = MakeShared<LocHubTests::FAsyncOutcome>();
+	Service->EnsureRunning(RecordOutcome(Outcome));
+
+	const double Deadline = FPlatformTime::Seconds() + 15.0;
+	// Fake is captured so the HTTP listener outlives RunTest: the probe is answered only on a later tick.
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([this, Fake, Service, Outcome, Terminated, NodePid, Deadline, TempDir]() -> bool
+	{
+		if (!Outcome->bDone && FPlatformTime::Seconds() < Deadline)
+		{
+			return false;
+		}
+		TestTrue(TEXT("Answered without hanging"), Outcome->bDone);
+		TestTrue(TEXT("The owned service was stopped for the new AI settings"), Terminated->Contains(NodePid));
+		TestTrue(TEXT("The restart attempt is used"), Service->IsAiRestartTried());
+
+		FLocHubServiceProcess::FConfig LengthOnly = Service->GetConfig();
+		LengthOnly.LengthArguments = TEXT("--length-check warning --length-scope ui --length-ratio 1.30 --length-extra 4 --length-hint on");
+		Service->SetConfig(LengthOnly);
+		TestFalse(TEXT("A Length-Check-only change re-arms the restart attempt"), Service->IsAiRestartTried());
+		LocHubTests::DeleteTempDir(TempDir);
+		return true;
+	}));
+	return true;
+}
+
 #endif

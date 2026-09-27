@@ -433,7 +433,7 @@ function needsQuoting(value: string): boolean {
 // A cell starting with =, +, - or @ can be read as a formula by Excel/Sheets (formula injection); a leading tab
 // defuses it without changing the value visually. The importer trims every cell before use (readGlossaryCsv), so
 // the export -> import round trip strips the guard tab back off and the value comes back unchanged.
-const FORMULA_INJECTION_PREFIXES = new Set(['=', '+', '-', '@']);
+export const FORMULA_INJECTION_PREFIXES: ReadonlySet<string> = new Set(['=', '+', '-', '@']);
 
 function csvField(value: string): string {
   const guarded = FORMULA_INJECTION_PREFIXES.has(value[0] ?? '') ? `\t${value}` : value;

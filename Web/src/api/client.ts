@@ -10,6 +10,8 @@ import type {
   Health,
   InboxItem,
   InboxRow,
+  ImportRequest,
+  ImportResult,
   JobEstimate,
   JobRecord,
   JobScope,
@@ -27,6 +29,8 @@ export interface ApiErrorBody {
   unit?: Unit;
   // 409 job_running (job resume): the running job's id, once its record exists (absent while still `starting`).
   jobId?: string;
+  // 409 preview_stale (import apply): the fresh preview of the same file, to show in place of the stale one.
+  result?: ImportResult;
 }
 
 // The cell revision and unit sourceRev the reviewer's card was showing when they acted, so the service can detect
@@ -190,6 +194,12 @@ export class LocHubApi {
   // run, so the card can show why a draft would be refused before the click.
   check(culture: string, unitId: string, text: string): Promise<{ issues: PrecheckIssue[] }> {
     return this.request('POST', `/api/cells/${segment(culture)}/${segment(unitId)}/check`, { text });
+  }
+
+  // Translation exchange (CONTRACT.md, POST /api/import): a dry run for the preview, then the same request with
+  // dryRun false to apply it.
+  importTranslations(request: ImportRequest): Promise<ImportResult> {
+    return this.request('POST', '/api/import', request);
   }
 
   retranslate(culture: string, unitId: string, note: string, asRule: boolean): Promise<{ cell: Cell; issues: PrecheckIssue[] }> {

@@ -10,15 +10,28 @@ export interface LlmRequest {
   params: Anthropic.MessageCreateParamsNonStreaming;
 }
 
+// 'skipped' (amendment 9): the request was never sent because runSync's shouldContinue declined it. It carries
+// no answer, no error and no tokens -- the caller holds its work for later instead of counting it anywhere.
 export type LlmOutcome =
   | { customId: string; kind: 'ok'; text: string; inputTokens: number; outputTokens: number }
   | { customId: string; kind: 'refusal' }
-  | { customId: string; kind: 'error'; message: string; retryable: boolean };
+  | { customId: string; kind: 'error'; message: string; retryable: boolean }
+  | { customId: string; kind: 'skipped' };
 
 export interface LlmClient {
   // onOutcome, when given, fires as soon as each request's outcome is known — lets the caller cache
   // an answer immediately instead of waiting for the whole round to finish.
-  runSync(requests: LlmRequest[], concurrency: number, onOutcome?: (outcome: LlmOutcome) => void): Promise<LlmOutcome[]>;
+  // shouldContinue, when given, is asked before each request that has not started yet; a declined request is not
+  // sent and comes back as a 'skipped' outcome (onOutcome does not fire for it). job.ts uses it to stop flooding an
+  // endpoint that has timed out before answering anything. The adapters built on runPool (llmShared.ts: OpenAI,
+  // xAI, DeepSeek, Custom, Gemini) honor it; the Anthropic SDK and Claude Code adapters ignore it -- neither reports
+  // a timeout job.ts recognizes (isTimeoutMessage), so for them the hook never declines anything anyway.
+  runSync(
+    requests: LlmRequest[],
+    concurrency: number,
+    onOutcome?: (outcome: LlmOutcome) => void,
+    shouldContinue?: () => boolean,
+  ): Promise<LlmOutcome[]>;
   // onProgress, when given, fires while polling with the number of requests that have succeeded so far out of
   // the total submitted (job progress). Only a succeeded request can settle strings; a refused, errored,
   // canceled or expired one reaches a terminal state without settling anything, so it is not counted here —
@@ -155,6 +168,8 @@ export class AnthropicLlmClient implements LlmClient {
     this.batchDir = options.batchDir;
   }
 
+  // Ignores LlmClient.runSync's shouldContinue (see there): the SDK retries its own timeouts and reports none the
+  // job probes on.
   async runSync(requests: LlmRequest[], concurrency: number, onOutcome?: (outcome: LlmOutcome) => void): Promise<LlmOutcome[]> {
     if (!this.hasKey) {
       const out = requests.map((r): LlmOutcome => ({ customId: r.customId, kind: 'error', message: `Anthropic: ${MISSING_KEY_MESSAGE}`, retryable: false }));

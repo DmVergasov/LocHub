@@ -2,14 +2,75 @@
 
 Types live in `src/contract.ts`; this file is the wire-level summary. All bodies are JSON (UTF-8).
 Base URL in local mode: `http://127.0.0.1:47810` (`lochub_service.mjs serve --project <ProjectDir> [--port] [--policy
-validated|approved_only] [--provider anthropic|openai|xai|deepseek|gemini] [--auth api|subscription]
-[--translate-model <id>] [--judge-model <id>] [--web-dir <dir>] [--web-deps-dir <dir>] [--brief-file <path>]`).
+validated|approved_only] [--provider anthropic|openai|xai|deepseek|gemini|custom] [--auth api|subscription]
+[--translate-model <id>] [--judge-model <id>] [--web-dir <dir>] [--web-deps-dir <dir>] [--brief-file <path>]
+[--base-url <url> | env LOCHUB_CUSTOM_BASE_URL] [--key-header bearer|api-key] [--structured-output json_schema|json_object|prompt_only]
+[--price-in <usd>] [--price-out <usd>] [--max-parallel <1-32>] [--request-timeout <30-300>]`).
 `--provider` defaults to `anthropic`, `--auth` to `api`; an absent or empty `--translate-model`/`--judge-model`
 falls back to the Anthropic defaults only for `--provider anthropic` — every other provider requires both flags.
 `--auth subscription` is only valid with `--provider anthropic`. `--brief-file` names a UTF-8 text file (a leading
 BOM is tolerated and stripped) read once at start — the project brief, sent with every translate and judge request
 (`buildCultureBlock`, `src/prompt.ts`); absent, or the file missing, means an empty brief, so an old plugin build
 that never passes the flag still works.
+
+`--length-check off|warning|confirm`, `--length-scope ui|all`, `--length-ratio <1-5>`, `--length-extra <0-100>`,
+`--length-ratios <culture>=<ratio>,...` and `--length-hint on|off` configure the Length Check (Project Settings >
+Plugins > LocHub > Length Check; `src/lengthCheck.ts`). Absent flags mean the check is off (an old plugin build); a
+value outside those sets or ranges, a malformed or repeated culture in `--length-ratios`, is a usage error. The limit
+of a unit in a culture is `ceil(visibleLength(source) × ratio) + extra` (ratios with two decimals; a culture override
+matches the exact culture case-insensitively, then its language before the first `-`), or none when the check is off,
+`--length-scope ui` and the unit's `LocHub.Kind` is not `ui`, or the source has nothing visible. `visibleLength` counts
+what the player sees: format arguments and rich-text tags 0, a plural/ordinal/gender/hpp argument its longest form,
+East Asian wide and fullwidth characters, and emoji (U+1F300–U+1F64F, U+1F900–U+1F9FF), 2; non-spacing and enclosing
+marks (`\p{Mn}`, `\p{Me}`) and zero-width characters (U+200B–U+200D, U+FEFF) 0 — a spacing mark (e.g. a Devanagari
+vowel sign) counts like ordinary text, not 0; the UE rich-text entities `&amp;` `&lt;` `&gt;` `&quot;` 1 each; every
+other code point 1.
+
+`--provider custom` is any OpenAI-compatible endpoint (a local model, a router, a private deployment). The Base URL
+comes from `--base-url` (`http://` or `https://`, no user name or password; one trailing `/` is trimmed;
+`/chat/completions` and `/models` are appended to its path, before any query string) when given, otherwise from the
+environment variable `LOCHUB_CUSTOM_BASE_URL`, read exactly like `LOCHUB_API_KEY` (`src/cli.ts`'s
+`resolveCustomBaseUrl`) — the editor sets this variable for the spawn and never puts the Base URL on the command
+line (Windows logs a failed `CreateProcess`'s whole command line on error; macOS's argument splitter drops a value
+ending in `=`); `--base-url` still wins when both are given, for a manual run or `Tools/media/shoot.mjs`. Neither
+source given is a usage error naming "Custom Base URL is required"; an invalid value's error names "--base-url" when
+it came from the flag and "Custom Base URL" when it came from the environment — no usage error ever echoes the base
+URL itself. `--provider custom` also takes `--key-header` (default `bearer`, sending `Authorization: Bearer <key>`;
+`api-key` sends `api-key: <key>`), `--structured-output` (default `json_schema`: strict `response_format:
+json_schema`; `json_object`: `response_format: json_object` with the schema in the system prompt; `prompt_only`: no
+`response_format`, schema in the system prompt), `--price-in`/`--price-out` (USD per 1M tokens for both models,
+default `0`), `--max-parallel` (default `2`; an n-slot semaphore inside the service's one `OpenAiCompatibleLlmClient`
+instance gates every request across every job running at once — not just one job's own workers — so every value
+1-32 takes effect) and `--request-timeout` (seconds **per attempt**, `30`-`300`, default `300`: Node's built-in fetch
+gives up on its own once a response's headers take longer than 300 s — `UND_ERR_HEADERS_TIMEOUT`, or
+`UND_ERR_BODY_TIMEOUT` for a stalled body — so a larger value could never take effect; either code, on the error or
+its `cause`, counts as a timeout exactly like the configured one firing). A request that times out is not retried at
+the fetch level — the job splits its group the same way it does a `max_tokens` truncation (see "Timeouts and probe
+mode" under Jobs), and that split, not a longer timeout, is what lets a slow model finish: each half is a shorter
+request. The timeout's English reason names the limit that fired (`Custom: the request timed out after 90 seconds`,
+`… after 5 minutes`). No
+output-token cap (`max_tokens`/`max_completion_tokens`) is ever sent to a Custom endpoint — the server's own default
+applies; a `finish_reason: "length"` still splits the group like a real cap being hit. A Custom chat request and the
+startup probe both refuse a redirect (`redirect: 'error'`) instead of following it — fetch forwards every header but
+`Authorization` cross-origin, `api-key` included — and report it as a non-retryable error telling the user to set
+Base URL to the final address; a refused redirect is final at once (the server answers the same 3xx every time), with
+no fetch-level retry. Any of the Custom-only flags with another provider is a usage error. The key still
+comes only from `LOCHUB_API_KEY` and may be empty for `custom` (no auth header is sent then). Both `--translate-model`
+and `--judge-model` stay required (the editor passes the translate model as the judge when Judge Model is empty).
+
+A Custom chat error's message is built from the response body read once as text: `error.message`, a string `error`,
+a top-level `message`, `detail`, then the raw text, in that order (the first non-empty one wins), scrubbed of every
+full URL (reduced to `scheme://host[:port]`), of the configured Base URL's exact path and query string (split out
+verbatim, so a literal character such as a comma inside a query cannot defeat the URL regex), of every query value of
+4 or more characters echoed on its own — as written in the Base URL or percent-decoded, replaced with `[redacted]`
+(a shorter value, or one that is part of the host or port, is left as is) — and of the key,
+then cut to 200 characters. A network failure names its cause the same way the probe does (e.g. `ECONNREFUSED`)
+instead of a bare "fetch failed". A missing `usage` (or a missing `completion_tokens`) falls back to the request's
+approximate input/output token counts (`approxInputTokens`/`approxOutputTokens`, `src/llmShared.ts`), the same guess
+used when the estimate itself is approximate. Answer parsing (`OpenAiCompatibleProfile.tolerantJson`) strips a
+leading `<think>...</think>` block before extracting the JSON object, and among balanced top-level objects prefers
+the one carrying the response schema's own required top-level key (`items` for translate, `issues` for judge) over
+the first one — a reasoning model's chain of thought can itself contain a draft JSON object.
 
 ## Identity
 
@@ -61,7 +122,7 @@ that never passes the flag still works.
   translate model thinks adaptively by default (thinking tokens bill as output), and precheck repair rounds and
   retries are not counted.
 - `JobEstimate` is `{ requests, items, strings, inputTokens, outputTokens, usd: number | null, billing: 'api' |
-  'subscription', approximate?: boolean }`. `requests`/`items` count the groups/units the model was actually
+  'subscription', approximate?, pricesUnset? }`. `requests`/`items` count the groups/units the model was actually
   asked about (TM reuse and cache hits are free and excluded); `inputTokens`/`outputTokens` are the upper-bound
   token counts the estimate is built from. `strings` is every string in scope the job would actually write —
   `items` plus TM reuse plus cached answers — and is `0` only when the scope truly has nothing to do; a web view
@@ -79,6 +140,11 @@ that never passes the flag still works.
   always `approximate: true`. Absent (never `false`) only when every group's count was a real, successful
   Anthropic-with-API-key `countTokens` call. The web shows "≈" / "approximate" wording wherever it renders an
   estimate with this set.
+  For `provider: 'custom'` the translate and judge models are both priced with `--price-in`/`--price-out`
+  instead of `PRICES_PER_MTOK`, so `usd` is never `null`; when both prices are `0`, `usd` is `0` and
+  `pricesUnset: true` is present (absent otherwise, never `false`) — Max USD then has nothing to limit, and the
+  web says so. With any price above `0` the estimate and the `maxUsd` requirement work exactly as for a built-in
+  provider.
   `POST /api/jobs` requires `maxUsd` (`400 { error: 'culture and maxUsd are required' }` when it is absent) and
   enforces it (`422 { error: 'budget' }`) only when billing is `'api'` **and** `usd` is known **and** nonzero; a
   subscription job, a job on an unpriced model, or a job whose `usd` is exactly `0` (no translate cost is
@@ -115,7 +181,7 @@ that never passes the flag still works.
   Batch remains fully supported here at the API level, but the editor's Jobs UI does not offer it — it always
   sends `mode: 'sync'` (the owner's decision, not a service limitation).
 - `POST /api/jobs` and `POST /api/jobs/estimate` answer `400 { error: 'ai_not_ready', message }` when `ai.auth`
-  is `'api'` and the provider's key variable is not set in the environment — the same check and `message` as
+  is `'api'`, the provider is not `custom`, and the key variable is not set in the environment — the same check and `message` as
   `GET /api/health`'s `ai.detail` (below), run before any LLM call. This matters most for the four providers
   whose estimate never touches the network (`approxInputTokens`, a local character count): without this gate a
   missing key used to fail the job instead of the request, silently, with no reason recorded. The subscription is
@@ -140,6 +206,23 @@ that never passes the flag still works.
   `needs_fix`/`llm_error` and no `ai_error` event is logged for translate work. TM reuse and any cached answer
   already written before that round are unaffected. A round with a mix of successes (including cache hits) and
   hard failures does not abort; the job finishes normally and the failures land in `errors`/`errorSamples`.
+- Timeouts and probe mode (`src/job.ts`, translate phase): a request whose error message carries the shared timeout
+  text (`timeoutMessage`/`isTimeoutMessage`, `src/llmShared.ts` — "the request timed out after …") has its group split
+  in two like a `max_tokens` truncation, and a single string that times out fails with that reason. This applies to
+  every provider whose adapter reports a timeout that way — OpenAI, xAI, DeepSeek, Gemini and Custom (LocHub's own
+  limit or Node's 300 s fetch limit); the Anthropic API (its SDK retries its own timeouts) and Claude Code (a timed-out
+  `claude` child is an ordinary retryable error) keep the whole-group retry. An endpoint that has **answered nothing**
+  in this job is probed instead of flooded: once a timeout lands before the job's first successful answer (a cache
+  hit counts as one), that round's requests that have not started yet are not sent (they are held, not failed — no
+  error, no cost, no progress), and each following round sends only the two halves of the largest group that timed
+  out while every other group waits unchanged. The first successful answer releases every waiting group, cut into
+  pieces no larger than the largest group that was answered, and the job continues under the rules above. A single
+  string that times out before any success ends the job `status: 'failed'` with that timeout's message (redacted),
+  before any cell is written — like the first-round abort, TM reuse already written stays. A hung endpoint therefore
+  costs about (1 + split depth) timeouts per parallel request (7 waves for a group of 40), and probe rounds do not use
+  the translate round budget. A probed string that fails for another reason (a hard error, a refusal) leaves the
+  waiting groups to be sent as they are once nothing is left to probe. Repair and judge requests are not probed: they
+  only run after translate answers came back.
 - `POST /api/cells/:culture/:unitId/retranslate`'s `502` keeps its current error code; the body's `error` text
   (there is no `message` field — `sendCellError` sends a `CellActionError` as `{ error, issues }`, `server.ts:106`)
   becomes `'The model call failed: <reason>'`, reason redacted, when the model call itself failed. A refusal
@@ -161,8 +244,9 @@ that never passes the flag still works.
     still polling, from `request_counts`). A string whose group is still being retried or was just split is not
     counted until a later, final outcome settles it.
   - `repair`: scoped to one repair round at a time — each round starts with its own `{ done: 0, total }`, where
-    `total` is the strings that round is repairing (however many still have a `hard` or `confirm` precheck issue
-    when the round starts, so a later round's `total` can be smaller than an earlier one's), and `done` rises as
+    `total` is the strings that round is repairing (however many still have a `hard` or `confirm` precheck issue,
+    or a soft `too_long` not yet repaired in this job, when the round starts, so a later round's `total` can be
+    smaller than an earlier one's), and `done` rises as
     each repair answer comes back. A job with no repair rounds (no such issues, or `maxRepairRounds: 0`) never
     reports this phase.
   - `judge`: starts with `{ done: 0, total }`; `total` is the judgeable strings (passed precheck); `done` rises
@@ -189,7 +273,7 @@ that never passes the flag still works.
   `jobsFinished` value it saw and reloads whenever a later poll reports a larger one, treating its very first
   poll as establishing that baseline rather than as a signal to reload. Absent from a service that predates this
   field — a client should treat that the same as "no reload", exactly like an old service's missing `ai`.
-- `ai`: `{ provider, auth, translateModel, judgeModel, batch, ready, detail, briefSha1, keyId }` —
+- `ai`: `{ provider, auth, translateModel, judgeModel, batch, ready, detail, briefSha1, keyId, customSettingsId?, endpoint?, lengthArgs }` —
   `provider`/`auth`/`translateModel`/`judgeModel` mirror the CLI's `--provider`/`--auth`/`--translate-model`/
   `--judge-model` (`AiConfig`, `src/providers.ts`).
   `briefSha1` is the lowercase hex SHA-1 of `--brief-file`'s raw bytes as read (before the BOM strip); an absent
@@ -213,6 +297,28 @@ that never passes the flag still works.
   when there is no key (test vector: key `abc` gives `a9993e364706`). The editor plugin computes the same value
   from its Project Settings key and treats the service as applied only when the two are equal; a missing `keyId`
   (an older service) counts as applied, the same rule `briefSha1` uses.
+  `lengthArgs` is the Length Check the service runs with, written back in the exact form the editor passes the
+  flags (`lengthArgsOf`, `src/lengthCheck.ts`): `--length-check off` when the check is off or no flag was given,
+  otherwise every flag in the fixed order `--length-check --length-scope --length-ratio --length-extra
+  [--length-ratios] --length-hint`, ratios with two decimals, overrides in the order given. The editor compares it
+  with the flags it would pass now and restarts the service on a difference; a missing `lengthArgs` (an older
+  service) counts as applied.
+  For `provider: 'custom'` only: a missing key is not an error — `ready` is `true` and `detail` is
+  `'No API key (not required for a custom endpoint)'` (`NO_KEY_NEEDED_DETAIL`, `src/providers.ts`), and the
+  `ai_not_ready` gate never fires. `customSettingsId` is the first 12 lowercase hex characters of SHA-1 over the raw
+  values of the Base URL (whichever of `--base-url` or `LOCHUB_CUSTOM_BASE_URL` was actually used), `--key-header`,
+  `--structured-output`, `--price-in`, `--price-out`, `--max-parallel` and
+  `--request-timeout`, joined with `\n` in that order (test vector: `http://localhost:11434/v1`, `bearer`,
+  `json_schema`, `0`, `0`, `2`, `600` gives `048a672d4a62`); the editor computes the same value and restarts the
+  service when they differ (absent counts as applied). `endpoint` is `{ url, status, detail?, missingModels? }`
+  (`EndpointHealth`, `src/contract.ts`): `url` is the base URL reduced to `scheme://host[:port]` (health never
+  carries the path, query or user info; error texts are scrubbed of them as described under `--provider custom`
+  above), `status` is `checking` until the one startup
+  `GET {base}/models` (10 s timeout, same auth header as chat requests) answers, then `ok` (every configured model
+  is listed; a bare name also matches its `:latest` tag), `model_missing` (`missingModels` lists the ids the
+  endpoint does not serve), `unreachable` (network error, timeout, or HTTP 401/403) or `unknown` (any other HTTP
+  error or a body that is not an OpenAI-style model list). The `ai` block never contains the Custom endpoint
+  settings themselves.
 - `pid`: `process.pid` of the running service. The plugin compares it against the pid recorded in its own
   `service.pid` file; the plugin adopts a service whose `pid` equals the node pid in `Saved/LocHub/service.pid`
   only when the host process recorded next to it (editor or `LocHubSync` commandlet) is no longer running
@@ -254,6 +360,14 @@ environment so an editor started from inside a Claude Code terminal cannot switc
 key value is never placed on a command line, in a log line, in an error message or in a test fixture file
 (`redactSecrets`, `src/llmShared.ts`, strips the `LOCHUB_API_KEY` value from provider error text).
 
+`LOCHUB_CUSTOM_BASE_URL` (`--provider custom` only) works the same way: the editor sets it for the spawn exactly
+like `LOCHUB_API_KEY` instead of putting the Base URL on the command line, the service reads it once at start
+(`src/cli.ts`'s `resolveCustomBaseUrl`) and passes the resolved value into `parseCustomEndpointFlags`, which prefers
+an explicit `--base-url` flag when one is given (a manual run, `Tools/media/shoot.mjs`). Unlike the key, the Base
+URL is not secret by itself, but its query string or authority may carry one (a token, a password) — it is never
+placed on a command line, in a log line or in an error message either; every place the service logs or returns it
+reduces it to `scheme://host[:port]` first (`reduceBaseUrl`, `src/customEndpoint.ts`).
+
 ## Format checks: `hard`, `confirm`, `soft`
 
 `PrecheckIssue = { code, severity, message }` (`src/precheck.ts`), returned by `check`, `retranslate` and a 422 from
@@ -269,6 +383,18 @@ key value is never placed on a command line, in a log line, in an error message 
   form name outside the CLDR set; the engine skips it).
 - `soft` — a hint: `untranslated`.
 
+`too_long` (Length Check): the translation's `visibleLength` is over the unit's limit; message `Too long for the UI:
+<len>/<limit> characters (Length Check in Project Settings)`. Its severity follows `--length-check`: `soft` under
+`warning`, `confirm` under `confirm`. Every precheck caller passes the limit (`precheckOptionsFor`, `src/cells.ts`), so
+`check`, `approve`/`edit` and job drafts agree. A job sends a soft `too_long` to repair once (the error line is the
+message plus `Shorten it while keeping the meaning, every placeholder and every tag.`); a `confirm` one takes part in
+every repair round like any other `confirm` issue. A repair never makes a good draft worse: for a string that did not
+block auto-accept before its repair round, if the round's answer now blocks (it dropped a placeholder, a DNT term, a
+required plural form...), the pre-repair text is kept instead, together with its own (soft) issues. With
+`--length-hint on`, each translate item that has a limit carries it as `maxLength`. Exact translation-memory reuse
+(step 0 of a job) runs the same precheck against the donor text: a reused text over its limit under `warning` still
+lands in band Y with `too_long` in its `qaFlags`, exactly like a fresh draft would.
+
 `approve`/`edit` take an optional `accept: string[]` (400 `{error:'accept must be an array of strings'}` otherwise):
 any `hard` issue → 422 `{ error, issues }` whatever `accept` says; `confirm` issues → 422 `{ error, issues }` unless
 `accept` names **every** `confirm` code of the text being approved/saved (a client that checked an older text cannot
@@ -276,6 +402,11 @@ approve issues it never showed). A `needs_fix` cell is re-checked like any other
 `accept`, is approvable. The event of an approve/edit that went through with confirm issues carries
 `accepted: string[]` (the codes); the field is absent otherwise. A translation job holds its drafts to both tiers:
 a draft with a `hard` or `confirm` issue goes to repair and, if it keeps one, is written `needs_fix`.
+
+`edit` re-bands the cell from the fresh check it just ran (`R` for a blocking issue kept only because `accept` named
+it, `Y` for any remaining soft issue such as a `too_long` under `warning`, `G` for none) instead of keeping the band
+the cell carried before the edit — a stored band is only ever recomputed by the next job or an edit, never by a
+settings change alone (see Length Check in the settings reference). `approve` does not change the band.
 
 The plural categories these checks use are the engine's, from the last Push (`pluralForms`, Push protocol below),
 falling back to Node's own ICU for a culture no Push has reported.
@@ -294,7 +425,7 @@ caught even if the request would otherwise have succeeded.
 
 ## Writes and `409 files_changed_on_disk`
 
-Every route that calls `store.save()` (push, export/ack, the cell actions, glossary/style PUT, inbox
+Every route that calls `store.save()` (push, export/ack, the cell actions, import, glossary/style PUT, inbox
 answer/dismiss/applied, a running job's own saves) can answer `409 { "error": "files_changed_on_disk",
 "message": "Localization/LocHub changed on disk since the service loaded it (a source control sync?). Restart the LocHub
 service." }` instead of its normal response: the store refused to overwrite a data file that changed on disk
@@ -315,17 +446,18 @@ Plugin: push, export, reconcile, export/ack, inbox (answered), inbox/applied, br
 | GET | `/api/coverage` | — | `{ pushedAt, findings: CoverageFinding[] }` from the last real Push |
 | GET | `/api/export?culture=ru` | — | `{ culture, policy, entries: ExportEntry[] }`; withholds `needs_fix`, `rejected` and empty cells, and any outdated cell (`basedOnSourceRev < unit.sourceRev`); under `approved_only` it withholds `ai_draft` too, so only `approved`, `edited` and `human_edit` cells are ever exported |
 | POST | `/api/export/ack` | `{ culture, written: [{unitId, translation}], rejected: [{unitId, translation, errors[]}] }` | `{ ok: true }` |
-| GET | `/api/cells?culture=ru` | `band, status, flag, groupKey, outdated=1, q, limit (max 1000), offset` | `{ total, rows: [{unit, cell, outdated}] }` |
+| GET | `/api/cells?culture=ru` | `band, status, flag, groupKey, outdated=1, q, limit (max 1000), offset` | `{ total, rows: [{unit, cell, outdated, lengthLimit}] }` |
 | POST | `/api/cells/:culture/:unitId/approve` | `{ actor?, expectedRevision?, expectedSourceRev?, accept? }` | `{ cell }`; 422 `{error, issues[]}` for a `hard` issue or a `confirm` issue `accept` does not name (Format checks, above); 400 for a malformed `accept`; 404; 409 `stale_cell` (below) |
 | POST | `/api/cells/:culture/:unitId/edit` | `{ text, actor?, expectedRevision?, expectedSourceRev?, accept? }` | same |
 | POST | `/api/cells/:culture/:unitId/reject` | `{ note?, actor?, expectedRevision?, expectedSourceRev? }` | same; `note` is optional, an empty reject is valid |
 | POST | `/api/cells/:culture/:unitId/retranslate` | `{ note, asRule? }` | `{ cell (with suggestion), issues[] }`; 404, 422, 502 |
 | GET | `/api/cells/:culture/:unitId/history` | — | `CellEvent[]`; an approve/edit confirmed despite `confirm` issues carries `accepted: string[]` |
 | POST | `/api/cells/:culture/:unitId/check` | `{ text }` | `{ issues: PrecheckIssue[] }`; runs exactly the check `approve`/`edit` run (`cells.ts` `checkCell`/`checkTranslation`), so the two can never drift; read-only — no store write, no event, no freshness requirement; 404; 400 `{error:'text is required'}` for a non-string `text` |
-| POST | `/api/jobs/estimate` | `{ culture, mode?, groupKey?, groupPrefix?, unitIds? }` | `{ estimate }` — `JobEstimate = { requests, items, strings, inputTokens, outputTokens, usd: number \| null, billing, approximate? }`; token counting runs up to 8 groups concurrently and remembers real counts by `requestId` for the life of the service (no repeat `countInputTokens` calls for an already-counted group); a rate-limit/overloaded error that survives the SDK's own retries falls every group not yet counted back to `approxInputTokens` and sets `approximate: true` instead of failing; a provider whose `countInputTokens` is never a real call (OpenAI-compatible, Gemini, Claude Code/subscription) also sets `approximate: true`; 400 `{error:'batch_unavailable'}` for `mode:'batch'` outside Anthropic+API key; 400 `{error:'ai_not_ready', message}` when `auth:'api'` and the key is unset; 400 `{error:'invalid_scope'}` for an empty/too-long `groupPrefix` or one combined with `groupKey`; 500 if the model API is unreachable — Anthropic with an API key only; every other provider/auth estimates locally and never 500s here |
-| POST | `/api/jobs` | `{ culture, maxUsd?, mode? ("sync" or "batch"), groupKey?, groupPrefix?, unitIds?, skipEstimate? }` | 202 `{ jobId, estimate }`; `maxUsd` is required when absent (400 `{error:'culture and maxUsd are required'}`) and enforced (422 `{error:'budget'}`) only when billing is `'api'` and `estimate.usd` is known and nonzero — otherwise (subscription, unpriced model, or a free `usd: 0` scope) it is ignored; a present `maxUsd` that is not a finite positive number is 400 `{error:'invalid_maxUsd'}` before any token counting; `skipEstimate: true` starts the job with zero provider calls before it (no `countInputTokens`) and ignores `maxUsd` entirely (not required, not validated, not enforced) — `estimate` is then computed locally with `approxInputTokens` and carries `approximate: true`; every other gate below still applies; 400 `{error:'batch_unavailable'}` for `mode:'batch'` outside Anthropic+API key; 400 `{error:'ai_not_ready', message}` when `auth:'api'` and the key is unset; 400 `{error:'invalid_scope'}` for an empty/too-long `groupPrefix` or one combined with `groupKey`; 409 `{ error: 'job_running', jobId? }` (a job for this culture is running or still being estimated; `jobId` is the running job's id, present once its record exists — absent while it is still `starting`, being estimated, with no record yet); 500 if the estimate call fails — Anthropic with an API key only, and never when `skipEstimate` is true; every other provider/auth estimates locally and never 500s here |
+| POST | `/api/jobs/estimate` | `{ culture, mode?, groupKey?, groupPrefix?, unitIds? }` | `{ estimate }` — `JobEstimate = { requests, items, strings, inputTokens, outputTokens, usd: number \| null, billing, approximate?, pricesUnset? }`; token counting runs up to 8 groups concurrently and remembers real counts by `requestId` for the life of the service (no repeat `countInputTokens` calls for an already-counted group); a rate-limit/overloaded error that survives the SDK's own retries falls every group not yet counted back to `approxInputTokens` and sets `approximate: true` instead of failing; a provider whose `countInputTokens` is never a real call (OpenAI-compatible, Gemini, Claude Code/subscription) also sets `approximate: true`; 400 `{error:'batch_unavailable'}` for `mode:'batch'` outside Anthropic+API key; 400 `{error:'ai_not_ready', message}` when `auth:'api'`, the provider is not `custom` and the key is unset; 400 `{error:'invalid_scope'}` for an empty/too-long `groupPrefix` or one combined with `groupKey`; 500 if the model API is unreachable — Anthropic with an API key only; every other provider/auth estimates locally and never 500s here |
+| POST | `/api/jobs` | `{ culture, maxUsd?, mode? ("sync" or "batch"), groupKey?, groupPrefix?, unitIds?, skipEstimate? }` | 202 `{ jobId, estimate }`; `maxUsd` is required when absent (400 `{error:'culture and maxUsd are required'}`) and enforced (422 `{error:'budget'}`) only when billing is `'api'` and `estimate.usd` is known and nonzero — otherwise (subscription, unpriced model, or a free `usd: 0` scope) it is ignored; a present `maxUsd` that is not a finite positive number is 400 `{error:'invalid_maxUsd'}` before any token counting; `skipEstimate: true` starts the job with zero provider calls before it (no `countInputTokens`) and ignores `maxUsd` entirely (not required, not validated, not enforced) — `estimate` is then computed locally with `approxInputTokens` and carries `approximate: true`; every other gate below still applies; 400 `{error:'batch_unavailable'}` for `mode:'batch'` outside Anthropic+API key; 400 `{error:'ai_not_ready', message}` when `auth:'api'`, the provider is not `custom` and the key is unset; 400 `{error:'invalid_scope'}` for an empty/too-long `groupPrefix` or one combined with `groupKey`; 409 `{ error: 'job_running', jobId? }` (a job for this culture is running or still being estimated; `jobId` is the running job's id, present once its record exists — absent while it is still `starting`, being estimated, with no record yet); 500 if the estimate call fails — Anthropic with an API key only, and never when `skipEstimate` is true; every other provider/auth estimates locally and never 500s here |
 | GET | `/api/jobs/:id` | — | `{ id, culture, status ("running", "done", "failed"), startedAt, estimate, report?, error?, progress? }`; 404 `{error:'Unknown job'}`. A running job can later end `status: 'failed'` with `error` set instead of `done`. Job records live only in memory: they are lost on a service restart, so a job that was `running` answers 404 after one. `progress` is `JobProgress` (Jobs section, above), absent until the first progress event and left at its last value once the job ends. |
 | GET | `/api/jobs?culture=ru` | — | the newest job record of that culture — running, else the most recently started finished/failed one — same shape as `/api/jobs/:id`; 404 `{error:'Unknown job'}` when the culture has none. Lets a view that lost its job id (e.g. remounted after a tab switch) find the job again. |
+| POST | `/api/import` | `{ culture, actor, dryRun, overwriteConflicts, acceptConfirm, previewDigest?, entries: ImportEntry[] }` | `{ rows: ImportRow[], counts, digest }` — see "Translation exchange" below; 400 `{ error }` for a malformed body, a file that names one string twice, or a culture that is not a translation culture of the project; 409 `files_changed_on_disk` on apply; 409 `{ error: 'preview_stale', message, result }` on apply when `previewDigest` no longer matches |
 | GET/PUT | `/api/glossary/:culture` | `GlossaryTerm[]` | terms / `{ ok: true }`; PUT 400 unless every term has non-empty string `term`, string `translation`, boolean `dnt`, string `note` (nothing is saved) |
 | GET/PUT | `/api/style/:culture` | `{ text }` | `{ text }` / `{ ok: true }` |
 | GET | `/api/inbox` | `status, culture` | `{ rows: [{ item: InboxItem, unit: {namespace, key, source, origin, devNotes} \| null }] }` — `unit` is `null` when the item's unit is no longer in the store |
@@ -337,6 +469,84 @@ Plugin: push, export, reconcile, export/ack, inbox (answered), inbox/applied, br
 | GET | `/api/bridge/stream` | — | SSE: `event: command` / `data: BridgeCommand`; comment lines `: connected` on open and `: ping` every 15 s |
 | POST | `/api/bridge/command` | `{ name, args }`, name is one of `BRIDGE_COMMANDS` | 202 `{delivered}`; 409 `editor_not_connected`; 400 |
 | GET | `/`, `/*` | — | the web app from `--web-dir` (`Resources/LocHubWeb`) and, for files it lacks, `--web-deps-dir` (`Source/ThirdParty/LocHubWebDeps`); every file `no-cache`; 503 text when `index.html` is missing |
+
+`lengthLimit` on a `GET /api/cells` row is the unit's Length Check limit in that culture (`number`), or `null` when it has none.
+
+## Translation exchange (`POST /api/import`)
+
+The web app exports CSV and XLIFF 1.2 itself from `GET /api/cells` rows (including `lengthLimit`) and parses the
+translators' files itself; the service only takes the work back. The web app sends the parsed entries first with
+`dryRun: true` for the preview, then the same request with `dryRun: false`.
+
+Request: `{ culture, actor, dryRun, overwriteConflicts, acceptConfirm, previewDigest?, entries }` with `ImportEntry =
+{ unitId?, namespace?, key?, source?, text, approved, exportedRevision?, exportedAt? }` (`contract.ts`). `actor` is
+trimmed and cut to 64 characters, and must be non-empty when `dryRun` is false. `exportedRevision` is a whole number
+≥ 0. `exportedAt` is a strict ISO 8601 date-time (`YYYY-MM-DDTHH:mm[:ss[.f]]`, where `f` is 1 to 9 fractional digits,
+optionally followed by `Z` or a `±HH:MM` offset — a value with no zone marker is read as UTC, never as the service's
+own local time; the pattern is `EXPORTED_AT_PATTERN` in `contract.ts`); any other shape is `400 { error }`, and so is
+a request that names one string twice. `previewDigest`, when present, must be a string (400 otherwise) — see "Preview
+digest" below. The culture goes through the culture guard (400) and must also be one of the project's translation
+cultures — the target cultures of the last Push plus any culture that already has cells, minus the native culture,
+the same set `/api/meta` lists: the native culture, or one `/api/meta` does not list, is `400 { error: "<culture> is
+not a translation culture of this project" }`.
+
+Response: `{ rows, counts, digest }` — one `ImportRow = { index, unitId?, outcome, conflict?, issues?, before?,
+after? }` per entry, in order, `counts: Record<ImportOutcome, number>` over all ten outcomes, and `digest` —
+`sha256(JSON.stringify(rows))`, first 16 hex characters, identifying this exact preview for the "Preview digest"
+apply-time check below. `issues` (the check's `ImportIssue[]`, the shape of `PrecheckIssue`), `before` (the cell's
+text) and `after` (the entry's text) are present for every entry that reached rule 5; `conflict: true` marks a
+detected conflict even when `overwriteConflicts` let the entry through.
+
+Rules per entry, in order:
+
+1. The unit, by `unitId` when given and it resolves to an active unit; else by `namespace` + `key` — which also
+   recovers an entry whose `unitId` a spreadsheet turned into a number (unit ids are 16 hex characters derived from
+   `sha256(namespace, key)`; about 1 in 1,800 are all-digit and Excel/Sheets saves those as `1.23457E+15`). An
+   explicit `unitId` that resolves to a *different* unit than `namespace` + `key` still wins, unchanged. Neither
+   resolves → `unknown`.
+2. `source` given and ≠ the unit's source → `stale`.
+3. `text` empty after trim → `empty` (an import never clears a translation).
+4. Nothing to do — `text` equals the cell's text and the entry approves nothing new → `unchanged`. An entry approves
+   something new when it says `approved` and either the cell is not approved yet, or the cell is approved but
+   `outdated` and the entry carries its `source` (re-approval, rule 7).
+5. Conflict — `exportedRevision` given and ≠ the cell's `revision`; or, with no revision, `exportedAt` given and the
+   cell has an event after it (`exported` and `ai_suggestion` events do not count: they leave the cell's text and
+   status alone). → `conflict`, unless `overwriteConflicts`.
+6. The check Save runs (`checkCell`, the same call as the `/check` route): a `hard` issue → `hard` (never applied); a
+   `confirm` issue → `confirm`, unless `acceptConfirm`.
+7. An overwritten conflict (rule 5 detected one and `overwriteConflicts` let it through) always lands as `changed`,
+   whatever the text or `approved` says — including when the file's text equals the cell's text: the row's approval
+   refers to a state of the string LocHub has since changed, so an overwritten conflict never approves. Otherwise: a
+   new text (`text` ≠ the cell's text) → `changed_approved` when the row approves **and** the cell was not already
+   `approved` at export — otherwise `changed`, whatever `approved` says (an exported `status` column an edited
+   translation left untouched never certifies the new text). The same text, approving now and not a conflict, →
+   `approved` — including an `approved`-but-`outdated` string re-approved against its current source.
+
+The apply is tied to the exact preview the caller saw. The dry-run response's `digest` identifies that set of rows;
+a non-dry-run request may send it back as `previewDigest`. The service always recomputes the rows and their digest
+against the store as it is *now* — a job, another tab, a Push, a glossary edit, or a reload after
+`files_changed_on_disk` can all have changed it since the preview — and when `previewDigest` is present and differs
+from the fresh digest, nothing is written (no cell, no event) and the response is `409 { error: 'preview_stale',
+message, result }`, where `result` is that fresh `{ rows, counts, digest }`, ready to show as the new preview.
+`previewDigest` is optional and checked only on apply: an apply that omits it works exactly as before, and a dry run
+never sees this check.
+
+Applying (`dryRun: false`): `changed` → `edited`; `changed_approved` and `approved` → `approved`;
+`basedOnSourceRev`/`basedOnSource` = the unit's current source; `revision` + 1. A new text gets provenance
+`human:<actor>` and clears the AI fields like an edit; `approved` keeps the provenance, like Approve. Every exporter
+writes the cell's revision unconditionally (`0` for a string that had no translation at export), so rule 5 also
+catches a LocHub write made after the export to a string that was empty then. One store save for the whole request —
+refused with 409 `files_changed_on_disk` before anything is written when the data files changed on disk, even when
+nothing in the request would end up being applied (the same `assertFresh()` gate the other mutating routes use), and
+refused with 409 `preview_stale` before anything is written when `previewDigest` no longer matches (above) — then one
+`CellEvent` per applied row in a single append: `action: "import"`, the actor, and `accepted` (the confirm codes
+`acceptConfirm` let through). A dry run writes nothing.
+
+A save that fails before this culture's cells file is written (the freshness/case-collision check, or `units.jsonl`)
+restores every applied cell in memory and writes no event: nothing from this import reaches disk. A save that fails
+after that file (another culture's cells, glossary, style, `inbox.jsonl`), or an `appendEvents` failure once the save
+itself already succeeded, still answers `500` — but by then this culture's translations are already on disk with no
+event recorded for them; the store's multi-file save is not atomic across that wider set.
 
 ## Pull protocol (plugin side)
 

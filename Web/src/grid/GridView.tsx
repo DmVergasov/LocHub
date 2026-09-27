@@ -97,6 +97,9 @@ export interface GridViewProps {
   // omitted value used to default to true (assume still in flight, never "failed"), which brought back
   // "Loading…" forever for any caller that forgot to pass it.
   loading: boolean;
+  // Extra toolbar controls after the Columns picker (translation Export…/Import…). Gets the rows the Grid shows
+  // right now, after every filter. Optional: without it the toolbar is unchanged.
+  toolbarExtra?: (filtered: readonly GridRow[]) => ReactNode;
 }
 
 interface OpenKeyDetails {
@@ -216,6 +219,7 @@ export function GridView({
   scrollMemory,
   loadedCultures,
   loading,
+  toolbarExtra,
 }: GridViewProps) {
   const isLoaded = (c: string) => loadedCultures.includes(c);
   // A culture absent from `loadedCultures` while a fetch is still in flight is loading; once that fetch settles
@@ -370,6 +374,7 @@ export function GridView({
           Apply {culture} live
         </button>
         <ColumnsPicker cultures={cultures} visible={visible} active={culture} onVisible={onVisible} />
+        {toolbarExtra?.(filtered)}
       </div>
       <div ref={scrollRef} className="grid-scroll">
         <div className="grid-header" style={{ gridTemplateColumns: columns, minWidth }}>

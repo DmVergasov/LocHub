@@ -1,4 +1,4 @@
-// File access for glossary Import/Export. Uses the editor binding (window.ue.lochub) when present, and falls
+// File access for the glossary and translation Import/Export. Uses the editor binding (window.ue.lochub) when present, and falls
 // back to a browser <input type="file"> / Blob download outside the editor tab, feature-detected the same way
 // bridge.canSync() is (see bridge.ts).
 import type { EditorBridge } from './bridge';
@@ -6,6 +6,7 @@ import type { EditorBridge } from './bridge';
 // Windows common-dialog filter syntax, as ULocHubBrowserBridge::PickTextFile/SaveTextFile expect it.
 const CSV_FILE_TYPES = 'CSV files (*.csv)|*.csv|All files (*.*)|*.*';
 const EXPORT_TITLE = 'Export CSV';
+const CSV_MIME = 'text/csv;charset=utf-8';
 
 export interface PickedTextFile {
   name: string;
@@ -54,11 +55,11 @@ function pickFileFromBrowser(accept: string): Promise<PickedTextFile | null> {
   });
 }
 
-function downloadInBrowser(name: string, text: string): SavedTextFile {
+function downloadInBrowser(name: string, text: string, mime: string): SavedTextFile {
   // Excel needs a BOM to read a plain .csv as UTF-8; the editor path never adds one here since the editor
   // writes the BOM itself (see ULocHubBrowserBridge::SaveTextFile). Written as the escape, not the literal
   // character: an invisible U+FEFF inside a string literal is indistinguishable from an empty prefix on sight.
-  const blob = new Blob(['\uFEFF' + text], { type: 'text/csv;charset=utf-8' });
+  const blob = new Blob(['\uFEFF' + text], { type: mime });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
@@ -71,16 +72,25 @@ function downloadInBrowser(name: string, text: string): SavedTextFile {
   return {};
 }
 
-export async function pickTextFile(bridge: EditorBridge, title: string, accept: string): Promise<PickedTextFile | null> {
+// fileTypes: the editor dialog's filter (Windows common-dialog syntax); accept: the browser picker's.
+export async function pickTextFile(bridge: EditorBridge, title: string, accept: string, fileTypes: string = CSV_FILE_TYPES): Promise<PickedTextFile | null> {
   if (!bridge.canPickFile()) return pickFileFromBrowser(accept);
-  const result = await bridge.pickFile(title, CSV_FILE_TYPES);
+  const result = await bridge.pickFile(title, fileTypes);
   if (result.cancelled) return null;
   return { name: result.name, bytes: base64ToBytes(result.base64) };
 }
 
-export async function saveTextFile(bridge: EditorBridge, name: string, text: string): Promise<SavedTextFile | null> {
-  if (!bridge.canSaveFile()) return downloadInBrowser(name, text);
-  const result = await bridge.saveFile(EXPORT_TITLE, name, CSV_FILE_TYPES, text);
+// fileTypes and title: the editor dialog's; mime: the browser download's media type.
+export async function saveTextFile(
+  bridge: EditorBridge,
+  name: string,
+  text: string,
+  fileTypes: string = CSV_FILE_TYPES,
+  title: string = EXPORT_TITLE,
+  mime: string = CSV_MIME,
+): Promise<SavedTextFile | null> {
+  if (!bridge.canSaveFile()) return downloadInBrowser(name, text, mime);
+  const result = await bridge.saveFile(title, name, fileTypes, text);
   if (result.cancelled) return null;
   return { path: result.path };
 }

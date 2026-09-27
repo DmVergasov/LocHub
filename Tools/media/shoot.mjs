@@ -19,21 +19,31 @@
 //    whose job-cost estimate is computed locally (OpenAiCompatibleLlmClient/GeminiLlmClient.countInputTokens
 //    -> approxInputTokens; never AnthropicLlmClient.countInputTokens, which calls the real /v1/messages/count_tokens
 //    endpoint). No translate/judge job is ever started — only POST /api/jobs/estimate, which never calls a model.
+//  - The Custom endpoint scene (10_custom_endpoint) runs a second shoot service (CUSTOM_SHOOT_PORT) with
+//    --provider custom and no API key, pointed at a loopback stand-in (FAKE_MODELS_PORT) that answers only
+//    GET /v1/models, the service's startup probe; any other request to the stand-in fails the shoot.
 //  - The editor bridge stream is only ever held open (a plain GET, never read for content); no bridge command
 //    is ever sent, and Preview/Apply live are never clicked.
 //  - Every process this script starts is stopped again by its own PID (service, Edge), never by image name.
 
 import { spawn, execFileSync } from 'node:child_process';
 import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { SHOOT_LENGTH_CHECK } from './shoot_length_check.mjs';
 import { SHOOT_PROVIDER } from './shoot_provider.mjs';
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 // The owner's own LocHub service lives on 47810 and must never be started, stopped or queried by this script.
 const SHOOT_PORT = 47811;
 const CDP_PORT = 9333;
+// The Custom (OpenAI-compatible) endpoint scene: its own shoot service and a loopback stand-in that only lists
+// CUSTOM_SHOOT_MODEL. Never a real endpoint, never a model call.
+const CUSTOM_SHOOT_PORT = 47812;
+const FAKE_MODELS_PORT = 47813;
+const CUSTOM_SHOOT_MODEL = 'qwen3:8b';
 const VIEWPORT = { width: 1280, height: 800, deviceScaleFactor: 2 };
 const FRAME_SIZE = { width: 1920, height: 1080 };
 
@@ -130,11 +140,93 @@ function startShootService(projectDir, logPath) {
       webDir,
       '--web-deps-dir',
       webDepsDir,
+      ...SHOOT_LENGTH_CHECK.args,
     ],
     { cwd: pluginRoot, env, stdio: ['ignore', logFd, logFd] },
   );
   closeSync(logFd);
   return child;
+}
+
+// The stand-in for a local OpenAI-compatible server: answers only GET /v1/models (the service's one startup probe)
+// with CUSTOM_SHOOT_MODEL. Every other request is recorded and answered 500; the scene fails if there was any.
+function startFakeModelsServer() {
+  const unexpected = [];
+  const server = createServer((request, response) => {
+    if (request.method === 'GET' && request.url === '/v1/models') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ object: 'list', data: [{ id: CUSTOM_SHOOT_MODEL, object: 'model' }] }));
+      return;
+    }
+    unexpected.push(`${request.method} ${request.url}`);
+    response.writeHead(500, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { message: 'The shoot stand-in only lists models.' } }));
+  });
+  return new Promise((resolveServer, reject) => {
+    server.once('error', reject);
+    server.listen(FAKE_MODELS_PORT, '127.0.0.1', () => resolveServer({ server, unexpected }));
+  });
+}
+
+// The Custom endpoint scene's service: the same shipped bundle and web app as startShootService, but --provider
+// custom against the stand-in above, with no API key at all (a local endpoint needs none) and both prices 0, so the
+// Jobs view shows the "prices are 0" hint.
+function startCustomShootService(projectDir, logPath) {
+  const logFd = openSync(logPath, 'w');
+  const env = { ...process.env };
+  delete env[SHOOT_PROVIDER.keyVar];
+  const child = spawn(
+    process.execPath,
+    [
+      shippedServicePath,
+      'serve',
+      '--project',
+      projectDir,
+      '--port',
+      String(CUSTOM_SHOOT_PORT),
+      '--provider',
+      'custom',
+      '--translate-model',
+      CUSTOM_SHOOT_MODEL,
+      '--judge-model',
+      CUSTOM_SHOOT_MODEL,
+      '--base-url',
+      `http://127.0.0.1:${FAKE_MODELS_PORT}/v1`,
+      '--key-header',
+      'bearer',
+      '--structured-output',
+      'json_schema',
+      '--price-in',
+      '0',
+      '--price-out',
+      '0',
+      '--max-parallel',
+      '2',
+      '--request-timeout',
+      '300',
+      '--web-dir',
+      webDir,
+      '--web-deps-dir',
+      webDepsDir,
+    ],
+    { cwd: pluginRoot, env, stdio: ['ignore', logFd, logFd] },
+  );
+  closeSync(logFd);
+  return child;
+}
+
+// Waits for the Custom service's startup probe (GET /api/health ai.endpoint) to leave 'checking'; anything but 'ok'
+// means the scene would not show what it is meant to.
+async function waitForEndpointOk(base, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const health = await (await fetch(`${base}/api/health`)).json();
+    const endpoint = health.ai?.endpoint;
+    if (endpoint?.status === 'ok') return;
+    if (endpoint && endpoint.status !== 'checking') throw new Error(`Custom shoot endpoint probe: ${endpoint.status} ${endpoint.detail ?? ''}`);
+    if (Date.now() > deadline) throw new Error('Custom shoot endpoint probe did not finish in time');
+    await sleep(200);
+  }
 }
 
 function stopByPid(pid, label) {
@@ -306,6 +398,25 @@ async function closeTab(cdpPort, tab) {
   }
 }
 
+// Navigates a fresh tab to one shot's url, waits for its prepare() condition, captures the raw screenshot and closes
+// the tab again. Shared by the shotList loop and the Length Check shot, which is captured separately (see main()) so
+// it sorts after 10_custom_endpoint in the "Shooting" log.
+async function shootOne(shot, rawDir) {
+  console.log(`Shooting ${shot.name}...`);
+  const tab = await openTab(CDP_PORT);
+  try {
+    await tab.navigate(shot.url);
+    await shot.prepare(tab);
+    const png = await tab.screenshotPng();
+    writeFileSync(join(rawDir, `${shot.name}.png`), png);
+  } finally {
+    await closeTab(CDP_PORT, tab);
+  }
+}
+
+// Set by main() once the demo project exists: the translator's CSV demo_project.ts writes for the import preview.
+let exchangeSamplePath = '';
+
 // ---------------------------------------------------------------------------------------------------
 // Step 4: the shot list. Unit ids were picked by hand from the deterministic demo store (see the report
 // for how each was found) so every card shows a real, telling row instead of an arbitrary one.
@@ -416,6 +527,118 @@ function shotList(base) {
   ];
 }
 
+// UI Menus.SaveAndQuit (de), the Length Check demo row (demo_project.ts lengthCheckUnits): the German label is far
+// longer than the button allows, so the card opens with the counter over its limit and the too_long warning listed.
+// Shot against the primary shoot service (its own --length-* flags are what the card's limits come from), but after
+// the Custom endpoint scene — frame 11 follows frame 10 in the "Shooting" log.
+function lengthCheckShot(base) {
+  return {
+    name: '11_length_check',
+    url: `${base}/?host=editor#/card/de/4f04eeb24d357b2d`,
+    async prepare(tab) {
+      await tab.waitFor("!!document.querySelector('.length-counter.over')");
+      await tab.waitFor("[...document.querySelectorAll('.issues li')].some((li) => li.textContent.startsWith('Too long for the UI'))");
+    },
+  };
+}
+
+// Translation exchange, Export… (Docs/07 "Export and import"): the same "prompts" search as 01_grid, so the scope
+// reads "Strings matching the current filters (9)", with XLIFF picked. Never clicks Export (no file is written).
+// Captured separately (see main()), after the Length Check shot, so it sorts last in the "Shooting" log.
+function exchangeExportShot(base) {
+  return {
+    name: '12_exchange_export',
+    url: `${base}/?host=editor#/grid`,
+    async prepare(tab) {
+      await tab.waitFor("document.querySelectorAll('.grid-row').length > 5");
+      await tab.evaluate(`(() => {
+        const input = document.querySelector('input[aria-label="Search"]');
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(input, 'prompts');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      })()`);
+      await tab.waitFor("document.querySelectorAll('.grid-row').length === 9");
+      await tab.evaluate("[...document.querySelectorAll('.toolbar button')].find((b) => b.textContent.trim() === 'Export…').click()");
+      await tab.waitFor("!!document.querySelector('[role=\"dialog\"][aria-label=\"Export translations\"]')");
+      await tab.evaluate(`(() => {
+        const select = document.querySelector('select[aria-label="Export format"]');
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+        setter.call(select, 'xliff');
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      })()`);
+      await tab.waitFor("document.querySelector('select[aria-label=\"Export format\"]').value === 'xliff'");
+    },
+  };
+}
+
+// Translation exchange, Import… preview: feeds demo_project.ts's translator CSV to the browser file picker the
+// web app opens (no editor binding here), through Edge's own file chooser intercepted over CDP — nothing about
+// the page is faked. The click carries a user gesture, which a file chooser requires. Never clicks the final
+// Import: the preview is a dry run and writes nothing.
+function exchangeImportShot(base) {
+  return {
+    name: '13_exchange_import',
+    url: `${base}/?host=editor#/grid`,
+    async prepare(tab) {
+      await tab.waitFor("document.querySelectorAll('.grid-row').length > 5");
+      await tab.send('DOM.enable');
+      await tab.send('Page.setInterceptFileChooserDialog', { enabled: true });
+      const chooser = tab.once('Page.fileChooserOpened');
+      await tab.send('Runtime.evaluate', {
+        expression: "[...document.querySelectorAll('.toolbar button')].find((b) => b.textContent.trim() === 'Import…').click()",
+        userGesture: true,
+      });
+      const { backendNodeId } = await chooser;
+      await tab.send('DOM.setFileInputFiles', { files: [exchangeSamplePath], backendNodeId });
+      await tab.waitFor("!!document.querySelector('[role=\"dialog\"][aria-label=\"Import translations\"]')", { timeoutMs: 15000 });
+      await tab.evaluate(`(() => {
+        const input = document.querySelector('input[aria-label="Reviewer name"]');
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(input, 'Alex Morgan');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      })()`);
+      // Opens the groups worth seeing: what changes, what is skipped and why, and the conflict.
+      await tab.evaluate("for (const d of document.querySelectorAll('.exchange-panel details')) { if (/^(Changed|Skipped|Conflicts) /.test(d.querySelector('summary')?.textContent ?? '')) d.open = true; }");
+      await tab.waitFor("[...document.querySelectorAll('.exchange-panel button')].some((b) => b.textContent.trim() === 'Import' && !b.disabled)");
+      await tab.evaluate("document.querySelector('.exchange-panel')?.scrollIntoView({ block: 'start' })");
+      await sleep(300);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Step 4b: the Custom (OpenAI-compatible) endpoint scene — the AI pill with the endpoint host and "endpoint OK",
+// and the Jobs view's "prices are 0" hint after an Estimate (computed locally; never a model call).
+// ---------------------------------------------------------------------------------------------------
+
+async function shootCustomEndpoint(projectDir, rawDir, logRoot) {
+  const { server: modelsServer, unexpected } = await startFakeModelsServer();
+  const service = startCustomShootService(projectDir, join(logRoot, 'shoot-custom-service.log'));
+  const base = `http://127.0.0.1:${CUSTOM_SHOOT_PORT}`;
+  let stopBridge;
+  try {
+    await waitForHttp(`${base}/api/health`, 15000);
+    await waitForEndpointOk(base, 15000);
+    stopBridge = await holdBridgeStream(base);
+    const tab = await openTab(CDP_PORT);
+    try {
+      await tab.navigate(`${base}/?host=editor#/jobs`);
+      await tab.waitFor("[...document.querySelectorAll('.ai-status')].some((el) => el.textContent.includes('endpoint OK'))");
+      await tab.waitFor("!!document.querySelector('.jobs')");
+      await tab.evaluate("[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Estimate')?.click()");
+      await tab.waitFor("document.body.innerText.includes('Max USD cannot limit spending')");
+      writeFileSync(join(rawDir, '10_custom_endpoint.png'), await tab.screenshotPng());
+    } finally {
+      await closeTab(CDP_PORT, tab);
+    }
+    if (unexpected.length > 0) throw new Error(`The Custom endpoint scene reached the stand-in beyond GET /v1/models: ${unexpected.join(', ')}`);
+  } finally {
+    if (stopBridge) stopBridge();
+    stopByPid(service.pid, 'custom shoot service');
+    modelsServer.close();
+  }
+}
+
 // ---------------------------------------------------------------------------------------------------
 // Step 5: frame composition (Tools/media/frames/feature.html), one headless Edge invocation per frame,
 // exactly the command line the brief specifies.
@@ -434,6 +657,13 @@ const FRAME_TEXTS = {
   '07_jobs': { title: 'Know the cost first', body: ['Every job shows an estimate and stops at your spending cap.'] },
   '08_inbox': { title: 'The AI asks instead of guessing', body: ['Answer once, and every later translation sees it.'] },
   '09_coverage': { title: 'Find text that skips localization', body: ['Player-visible strings that bypass localization, with file and line.'] },
+  '10_custom_endpoint': {
+    title: 'Your model, your machine',
+    body: ['Any OpenAI-compatible endpoint: Ollama, LM Studio, OpenRouter, Azure OpenAI.', 'With a local model, your text never leaves your machine.'],
+  },
+  '11_length_check': { title: 'Text that fits your UI', body: ['Translations that would overflow the UI are flagged.', 'The AI is told the length limit up front.'] },
+  '12_exchange_export': { title: 'Work with human translators', body: ['Export any culture to XLIFF for CAT tools,', 'or to CSV for spreadsheets.'] },
+  '13_exchange_import': { title: 'Their work comes back checked', body: ['Every imported string passes the same format checks.', 'Preview conflicts and warnings before anything changes.'] },
 };
 
 function renderFrame(name, rawPngPath, outPngPath, logPath) {
@@ -475,6 +705,7 @@ async function main() {
 
   console.log('Generating demo project...');
   generateDemoProject(projectDir, join(logRoot, 'shoot-demo.log'));
+  exchangeSamplePath = join(projectDir, 'Localization', 'exchange_sample_de.csv');
 
   console.log('Starting shoot service...');
   const service = startShootService(projectDir, join(logRoot, 'shoot-service.log'));
@@ -487,6 +718,9 @@ async function main() {
     await waitForHttp(`${base}/api/health`, 15000);
     const health = await (await fetch(`${base}/api/health`)).json();
     if (!health.ai?.ready) throw new Error(`Shoot service ai.ready is false: ${health.ai?.detail}`);
+    // The demo's stored bands were computed with SHOOT_LENGTH_CHECK; a service running another Length Check would show
+    // cards whose live check disagrees with them.
+    if (health.ai?.lengthArgs !== SHOOT_LENGTH_CHECK.args.join(' ')) throw new Error(`Shoot service runs another Length Check: ${health.ai?.lengthArgs}`);
     console.log(`Shoot service up (pid ${service.pid}), ai=${JSON.stringify(health.ai)}`);
 
     console.log('Pushing the demo coverage snapshot over HTTP (dry run first)...');
@@ -515,17 +749,16 @@ async function main() {
     await waitForHttp(`http://127.0.0.1:${CDP_PORT}/json/version`, 10000);
 
     for (const shot of shotList(base)) {
-      console.log(`Shooting ${shot.name}...`);
-      const tab = await openTab(CDP_PORT);
-      try {
-        await tab.navigate(shot.url);
-        await shot.prepare(tab);
-        const png = await tab.screenshotPng();
-        writeFileSync(join(rawDir, `${shot.name}.png`), png);
-      } finally {
-        await closeTab(CDP_PORT, tab);
-      }
+      await shootOne(shot, rawDir);
     }
+
+    console.log('Shooting 10_custom_endpoint (second service, loopback model list only)...');
+    await shootCustomEndpoint(projectDir, rawDir, logRoot);
+
+    await shootOne(lengthCheckShot(base), rawDir);
+
+    await shootOne(exchangeExportShot(base), rawDir);
+    await shootOne(exchangeImportShot(base), rawDir);
 
     console.log('Rendering frames...');
     for (const name of Object.keys(FRAME_TEXTS)) {

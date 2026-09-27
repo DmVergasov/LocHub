@@ -228,3 +228,11 @@ describe('buildJudgeParams', () => {
     expect(params.output_config).toMatchObject({ effort: 'medium', format: { type: 'json_schema' } });
   });
 });
+
+describe('TRANSLATE_RULES: Length Check', () => {
+  it('explains maxLength the way the precheck counts it', () => {
+    expect(TRANSLATE_RULES).toContain(
+      '- If an item has maxLength, keep the translation within maxLength visible characters: placeholders and tags count 0, CJK characters count 2. Prefer a natural shorter wording over abbreviations.',
+    );
+  });
+});

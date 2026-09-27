@@ -22,7 +22,8 @@ list:
   truth at submission time** — the list below is the current runtime-dependency baseline that feeds them,
   not a substitute for reading the generated files.
 - **The AI provider APIs the plugin talks to** (not bundled code, but external services the product
-  integrates with): **Anthropic, OpenAI, xAI, DeepSeek, Google Gemini**.
+  integrates with): **Anthropic, OpenAI, xAI, DeepSeek, Google Gemini, and any OpenAI-compatible endpoint the
+  user configures**.
 
 Baseline runtime dependencies as declared in the two `package.json` files today (2026-09-26), with
 license taken from each package's own `node_modules/<pkg>/package.json`:

@@ -58,6 +58,9 @@ export interface JobEstimate {
   // first place (LlmClient.countsAreApproximate, llm.ts — OpenAI-compatible, Gemini, Claude Code/subscription).
   // Absent (never `false`) only when every group's count was a real, successful Anthropic countTokens call.
   approximate?: boolean;
+  // Custom endpoints only: true when both Project Settings prices are 0, so usd is 0 and Max USD cannot limit
+  // spending (the web says so). Absent (never `false`) otherwise.
+  pricesUnset?: boolean;
 }
 
 export class BudgetExceededError extends Error {
@@ -67,8 +70,9 @@ export class BudgetExceededError extends Error {
   }
 }
 
-function priceOf(model: string): { input: number; output: number } | null {
-  return PRICES_PER_MTOK[model] ?? null;
+// A Custom endpoint's own prices apply to whatever model id it serves; built-in providers use the table.
+function priceOf(model: string, customPrice: JobOptions['customPrice']): { input: number; output: number } | null {
+  return customPrice ?? PRICES_PER_MTOK[model] ?? null;
 }
 
 // estimateJob counts a French job of 715 strings with 162 sequential countInputTokens calls in 38.6s
@@ -148,8 +152,9 @@ export async function estimateJob(
   billing: 'api' | 'subscription' = 'api',
   extra: EstimateExtras = {},
 ): Promise<JobEstimate> {
-  const translatePrice = priceOf(opts.translateModel);
-  const judgePrice = priceOf(opts.judgeModel);
+  const translatePrice = priceOf(opts.translateModel, opts.customPrice);
+  const judgePrice = priceOf(opts.judgeModel, opts.customPrice);
+  const pricesUnset = opts.customPrice !== undefined && opts.customPrice.input === 0 && opts.customPrice.output === 0;
   const plan = planWork(store, opts);
   // TM reuse never reaches plan.groups at all; a cached group is counted below, as it is found.
   let strings = plan.tmHits.length;
@@ -269,6 +274,7 @@ export async function estimateJob(
     usd,
     billing,
     ...(approximate ? { approximate: true as const } : {}),
+    ...(pricesUnset ? { pricesUnset: true as const } : {}),
   };
 }
 

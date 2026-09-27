@@ -330,3 +330,26 @@ describe('estimateJob skipNetwork', () => {
     expect(estimate.approximate).toBeUndefined();
   });
 });
+
+describe('estimateJob with Custom endpoint prices', () => {
+  it('prices both models with the endpoint prices, whatever the model ids', async () => {
+    const { store, cache } = setup();
+    const estimate = await estimateJob(store, llm, cache, opts({ translateModel: 'qwen3:8b', judgeModel: 'llama3.2', customPrice: { input: 1, output: 2 } }));
+    // 3 items, 2000 input tokens: (2000*1 + 450*2 + (2000+450)*1 + 120*2) / 1e6.
+    expect(estimate.usd).toBeCloseTo(0.00559, 10);
+    expect(estimate).not.toHaveProperty('pricesUnset');
+  });
+
+  it('reports usd 0 and pricesUnset when both endpoint prices are 0', async () => {
+    const { store, cache } = setup();
+    const estimate = await estimateJob(store, llm, cache, opts({ translateModel: 'qwen3:8b', judgeModel: 'qwen3:8b', customPrice: { input: 0, output: 0 } }));
+    expect(estimate).toMatchObject({ items: 3, usd: 0, pricesUnset: true });
+  });
+
+  it('leaves built-in pricing unchanged: an unknown model is still null, with no pricesUnset', async () => {
+    const { store, cache } = setup();
+    const estimate = await estimateJob(store, llm, cache, opts({ translateModel: 'qwen3:8b' }));
+    expect(estimate.usd).toBeNull();
+    expect(estimate).not.toHaveProperty('pricesUnset');
+  });
+});

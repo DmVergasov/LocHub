@@ -13,6 +13,13 @@ const PHASE_LABELS: Record<JobProgress['phase'], string> = {
   write: 'Writing',
 };
 
+// Why an estimate without a dollar amount has none: the subscription bills nothing per token, a Custom endpoint's
+// prices are 0 in Project Settings, or the model has no entry in the service's price table.
+function noDollarsNote(billing: 'api' | 'subscription', estimate: JobEstimate): string {
+  if (billing === 'subscription') return 'uses your Claude subscription limits';
+  return estimate.pricesUnset ? 'no price set' : 'price unknown for this model';
+}
+
 function JobProgressBar({ progress: { phase, done, total } }: { progress: JobProgress }) {
   const label = total === 0 ? `${PHASE_LABELS[phase]}…` : `${PHASE_LABELS[phase]} · ${done} / ${total} strings`;
   return (
@@ -286,8 +293,9 @@ export function JobsView({ api, culture, rows = [], billing = 'api', aiReady = t
           <p>
             ≈ {estimate.items} strings in {estimate.requests} requests · ≈ {estimate.inputTokens.toLocaleString('en-US')} input /{' '}
             {estimate.outputTokens.toLocaleString('en-US')} output tokens ·{' '}
-            {billing === 'subscription' ? 'uses your Claude subscription limits' : 'price unknown for this model'}
+            {noDollarsNote(billing, estimate)}
           </p>
+          {estimate.pricesUnset && <p className="muted">Custom endpoint prices are 0 in Project Settings; Max USD cannot limit spending.</p>}
           {estimate.approximate && <p className="muted">≈ Approximate: token counts are estimated from text length; the job report shows the real usage.</p>}
           <button type="button" onClick={() => void start()} disabled={running || starting || !aiReady} title={aiReady ? undefined : aiDetail}>
             Run

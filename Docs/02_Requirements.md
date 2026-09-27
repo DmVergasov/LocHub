@@ -47,9 +47,9 @@ service from source yourself; see [10_Commandlet_and_CI.md](10_Commandlet_and_CI
 ## An AI provider account
 
 LocHub does not translate anything on its own — it sends strings to an AI provider you choose and pick a
-model for. You need an account and an API key with one of the supported providers before you can run a
-translation job. See [05_AI_Providers_and_Keys.md](05_AI_Providers_and_Keys.md) for the full list and where
-to enter the key.
+model for. For most providers you need an account and an API key before you can run a translation job; a
+**Custom (OpenAI-compatible)** endpoint pointed at a local model (Ollama, LM Studio, ...) needs neither. See
+[05_AI_Providers_and_Keys.md](05_AI_Providers_and_Keys.md) for the full list and where to enter the key.
 
 > **Tip:** you can install LocHub and explore the Grid, Glossary and Settings without an API key. You only
 > need one when you run your first translation job.

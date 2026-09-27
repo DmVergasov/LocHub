@@ -6,6 +6,9 @@ import { parseOrigin } from '../origin';
 export interface GridCell {
   cell: Cell;
   outdated: boolean;
+  // The row's lengthLimit from GET /api/cells (CellRow). Dropped once the unit's source changes under it, since the
+  // limit is computed from the source; the next load of that culture brings the new one.
+  lengthLimit?: number | null;
 }
 
 export interface GridRow {
@@ -33,7 +36,7 @@ export interface GridFilters {
 
 export const NO_FILTERS: GridFilters = { q: '', status: '', band: '', outdated: false, namespace: '', asset: '' };
 
-function compareText(a: string, b: string): number {
+export function compareText(a: string, b: string): number {
   if (a < b) return -1;
   if (a > b) return 1;
   return 0;
@@ -50,9 +53,9 @@ function computeSearch(unit: Unit, cells: Record<string, GridCell>): string {
 
 export function mergeCulture(data: GridData, culture: string, rows: readonly CellRow[]): GridData {
   const next = new Map(data);
-  for (const { unit, cell, outdated } of rows) {
+  for (const { unit, cell, outdated, lengthLimit } of rows) {
     const existing = next.get(unit.id);
-    const cells = { ...(existing?.cells ?? {}), [culture]: { cell, outdated } };
+    const cells = { ...(existing?.cells ?? {}), [culture]: { cell, outdated, lengthLimit } };
     // A Pull can move a unit's sourceRev or change its source text under an id already in `data`; the row's
     // existing `search` was computed from the OLD unit's key/source, so appending onto it would keep that stale
     // text forever, and every already-loaded culture's own `outdated` flag was computed against the OLD unit too.
@@ -61,7 +64,13 @@ export function mergeCulture(data: GridData, culture: string, rows: readonly Cel
     // unit, or a brand-new row) keeps the incremental search append and this cell's own outdated flag as given.
     if (existing !== undefined && (existing.unit.sourceRev !== unit.sourceRev || existing.unit.source !== unit.source)) {
       const refreshedCells: Record<string, GridCell> = {};
-      for (const [c, gridCell] of Object.entries(cells)) refreshedCells[c] = { cell: gridCell.cell, outdated: isOutdated(unit, gridCell.cell) };
+      // A limit is computed from the source: after a source change only this culture's (just computed) limit is
+      // current; the others are dropped until their culture reloads.
+      const sourceChanged = existing.unit.source !== unit.source;
+      for (const [c, gridCell] of Object.entries(cells)) {
+        const lengthLimit = c === culture || !sourceChanged ? gridCell.lengthLimit : undefined;
+        refreshedCells[c] = { cell: gridCell.cell, outdated: isOutdated(unit, gridCell.cell), lengthLimit };
+      }
       next.set(unit.id, { unit, cells: refreshedCells, search: computeSearch(unit, refreshedCells) });
       continue;
     }
@@ -89,7 +98,7 @@ export function withCell(data: GridData, cell: Cell): GridData {
   const row = data.get(cell.unitId);
   if (!row) return data;
   const next = new Map(data);
-  const cells = { ...row.cells, [cell.culture]: { cell, outdated: isOutdated(row.unit, cell) } };
+  const cells = { ...row.cells, [cell.culture]: { cell, outdated: isOutdated(row.unit, cell), lengthLimit: row.cells[cell.culture]?.lengthLimit } };
   next.set(cell.unitId, { ...row, cells, search: computeSearch(row.unit, cells) });
   return next;
 }
@@ -101,7 +110,10 @@ export function withUnit(data: GridData, unit: Unit): GridData {
   if (!row) return data;
   const next = new Map(data);
   const cells: Record<string, GridCell> = {};
-  for (const [culture, gridCell] of Object.entries(row.cells)) cells[culture] = { cell: gridCell.cell, outdated: isOutdated(unit, gridCell.cell) };
+  for (const [culture, gridCell] of Object.entries(row.cells)) {
+    const lengthLimit = unit.source === row.unit.source ? gridCell.lengthLimit : undefined;
+    cells[culture] = { cell: gridCell.cell, outdated: isOutdated(unit, gridCell.cell), lengthLimit };
+  }
   next.set(unit.id, { unit, cells, search: computeSearch(unit, cells) });
   return next;
 }

@@ -6,6 +6,7 @@
 #include "Containers/Ticker.h"
 #include "HAL/PlatformProcess.h"
 
+class ULocHubSettings;
 struct FLocHubHealth;
 struct FLocHubNodeCheck;
 
@@ -25,7 +26,7 @@ public:
 		bool bAutoStart = true;
 		/** "validated" or "approved_only" (ULocHubSettings::ReleasePolicyToString). */
 		FString Policy = TEXT("validated");
-		/** "anthropic", "openai", "xai", "deepseek" or "gemini" (ULocHubSettings::AiProviderToString); passed to --provider. */
+		/** "anthropic", "openai", "xai", "deepseek", "gemini" or "custom" (ULocHubSettings::AiProviderToString); passed to --provider. */
 		FString Provider = TEXT("anthropic");
 		/** "api" or "subscription"; only Anthropic may use "subscription". Passed to --auth. */
 		FString Auth = TEXT("api");
@@ -54,6 +55,27 @@ public:
 		 *  key edit gets the same apply-now-or-after-the-job restart as a provider/model change, without ever
 		 *  comparing or logging the key itself. */
 		FString KeyId;
+		/** Custom provider only (empty or 0 for every other provider, see MakeDefaultConfig). CustomBaseUrl never
+		 *  reaches the serve command line: it travels only as the BaseUrlEnvVarName environment variable of the
+		 *  spawned child (see StartNode), the same way ApiKey travels as ApiKeyEnvVarName. --key-header,
+		 *  --structured-output, --price-in, --price-out, --max-parallel and --request-timeout are still
+		 *  BuildServeArguments' flags. The base URL may carry a token in its query: only ReduceBaseUrl of it may
+		 *  reach a log line, service.log or an error text. */
+		FString CustomBaseUrl;
+		FString CustomKeyHeader;
+		FString CustomStructuredOutput;
+		FString CustomPriceIn;
+		FString CustomPriceOut;
+		int32 CustomMaxParallel = 0;
+		int32 CustomRequestTimeoutSeconds = 0;
+		/** ComputeCustomSettingsId(*this) for the Custom provider, empty otherwise; compared against
+		 *  FLocHubHealth::AiCustomSettingsId by IsAiConfigApplied so a Custom endpoint edit gets the same
+		 *  apply-now-or-after-the-job restart as a provider/model change. */
+		FString CustomSettingsId;
+		/** The Length Check flags (BuildLengthArguments of the Project Settings), appended to the "serve" command line and
+		 *  compared against FLocHubHealth::AiLengthArgs by IsAiConfigApplied, so a Length Check edit gets the same
+		 *  apply-now-or-after-the-job restart as a provider/model change. Empty: no flags, the service's own default (off). */
+		FString LengthArguments;
 	};
 
 	using FOnReady = TFunction<void(bool bOk, const FString& InError)>;
@@ -64,12 +86,21 @@ public:
 	/** Settings of ULocHubSettings, the LocHub plugin folder and <Project>/Saved/LocHub. */
 	static FConfig MakeDefaultConfig();
 	static FString BuildServeArguments(const FConfig& InConfig);
+	/** The "serve" flags for the Length Check settings of InSettings: "--length-check off" when disabled, otherwise every
+	 *  flag, ratios with two decimals, culture overrides trimmed, sorted and clamped to 1.0-5.0; an override whose key is
+	 *  not a culture or language code (or repeats one) is skipped with a warning. Service/src/lengthCheck.ts lengthArgsOf
+	 *  writes the same string back as /api/health's ai.lengthArgs. */
+	static FString BuildLengthArguments(const ULocHubSettings& InSettings);
 	/** True when InHealth reports no "ai" object (an old build: provider empty, nothing to compare) or when its
 	 *  provider and auth match InConfig's and each model matches InConfig's -- or InConfig's model is empty, meaning
 	 *  the service picked its own default and there is nothing to compare -- and the brief hashes match, unless either
 	 *  side has none (an old service build; a brief.md WriteBriefFile could not write), and the key ids match, unless
 	 *  InHealth has no "keyId" field at all (an old service build: nothing to compare -- but, unlike the brief hash,
-	 *  an explicitly empty key id on both sides still counts as a match, not a skip; key-contract.md §3). Case-sensitive:
+	 *  an explicitly empty key id on both sides still counts as a match, not a skip; key-contract.md §3), and the
+	 *  Custom settings id matches (InConfig.CustomSettingsId against ai.customSettingsId), unless InHealth has no
+	 *  "customSettingsId" field (an old service build, or any provider other than Custom: a provider switch already
+	 *  differs above), and the Length Check flags match (InConfig.LengthArguments, or "--length-check off" when
+	 *  empty, against ai.lengthArgs), unless InHealth has no "lengthArgs" field (an old service build). Case-sensitive:
 	 *  both sides are the same wire names (ULocHubSettings::AiProviderToString and the auth equivalent). */
 	static bool IsAiConfigApplied(const FConfig& InConfig, const FLocHubHealth& InHealth);
 	/** Lowercase hex SHA-1 of InText's UTF-8 bytes (no BOM) -- the same bytes WriteBriefFile writes and the same
@@ -89,10 +120,37 @@ public:
 	/** First 12 lowercase hex characters of HashBriefUtf8(InKey) (key-contract.md §3), or an empty string when
 	 *  InKey is empty. Test vector: "abc" -> "a9993e364706". */
 	static FString ComputeKeyId(const FString& InKey);
+	/** First 12 lowercase hex characters of HashBriefUtf8 over InConfig's seven Custom flag values joined with "\n"
+	 *  (base URL, key header, structured output, input price, output price, max parallel, request timeout) -- the
+	 *  very strings BuildServeArguments puts on the serve line, so the Node side (customSettingsIdOf) hashes the
+	 *  same text. Test vector: http://localhost:11434/v1, bearer, json_schema, 0, 0, 2, 600 -> "048a672d4a62". */
+	static FString ComputeCustomSettingsId(const FConfig& InConfig);
+	/** scheme://host[:port] of InUrl: never its path, query, fragment or user info; empty when InUrl has no http(s)
+	 *  scheme, when an '@' past the host leaves its user info ambiguous, or when what user info stripping leaves
+	 *  behind is not a whitelisted host (ASCII letters, digits, '.', '-', '_', or a bracketed IPv6 literal)
+	 *  optionally followed by ':' and 1-5 digits no greater than 65535 -- this also rejects a '%' (an escaped '@'
+	 *  among them), a non-digit port, a port above 65535, a second ':', an empty host, a space or non-ASCII. The
+	 *  only form of a Custom base URL that may reach a log line, service.log or an error text. */
+	static FString ReduceBaseUrl(const FString& InUrl);
+	/** Provider/auth/endpoint/models for a log line -- "custom/api http://localhost:11434 qwen3:8b/qwen3:8b", or
+	 *  "anthropic/api claude-opus-5-5/claude-sonnet-5" without an endpoint. InEndpoint goes through ReduceBaseUrl;
+	 *  never includes an API key or an environment value. */
+	static FString DescribeAiConfig(const FString& InProvider, const FString& InAuth, const FString& InEndpoint, const FString& InTranslateModel, const FString& InJudgeModel);
+	/** Why InConfig can never start the service, or empty when it can. Checks the Custom provider only: a Base URL
+	 *  that is not http(s), has no acceptable host (including a port above 65535), or carries a user name or
+	 *  password; and an empty Translate Model. StartNode fails with this text (the editor shows it as a
+	 *  notification) before it looks for Node.js. */
+	static FString DescribeConfigProblem(const FConfig& InConfig);
 	/** Name of the environment variable set for the spawned "lochub serve" process only (key-contract.md §1); the
 	 *  editor's own copy is never read except to capture and restore it around the spawn (see StartNode and
 	 *  FLocHubScopedEnvVar). */
 	static const TCHAR* const ApiKeyEnvVarName;
+	/** Name of the environment variable that carries the Custom Base URL to the same spawn, and only there (spec
+	 *  amendment 1, final review I-1): the serve command line never carries --base-url, so the engine cannot log
+	 *  it on a failed CreateProcess (Windows) or mis-split it at a trailing '=' (macOS). Set and restored exactly
+	 *  like ApiKeyEnvVarName; the service reads --base-url when given (manual and tool runs) and this variable
+	 *  otherwise. */
+	static const TCHAR* const BaseUrlEnvVarName;
 
 	FString GetBaseUrl() const;
 	const FConfig& GetConfig() const;
@@ -192,7 +250,7 @@ private:
 	bool bRestartRequested = false;
 	/** True once an AI-mismatch restart has been attempted for the current Config, so OnHealthProbed never loops
 	 *  restarting a service whose fresh process still disagrees. Reset by SetConfig whenever Provider/Auth/
-	 *  TranslateModel/JudgeModel/KeyId/BriefSha1 differ from the previous Config. */
+	 *  TranslateModel/JudgeModel/KeyId/BriefSha1/CustomSettingsId/LengthArguments differ from the previous Config. */
 	bool bAiRestartTried = false;
 	/** True while an AI-mismatch restart is deferred behind a running translation job; drives AiRestartPendingTickerHandle
 	 *  and gates the one-per-deferral user notification. Cleared on a match, on a restart, on Stop() and in the

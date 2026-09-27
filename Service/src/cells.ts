@@ -1,7 +1,9 @@
 import { isOutdated, keepAudit, type Cell, type CellEventAction, type Culture, type ExportAck, type ExportEntry, type ReleasePolicy, type Unit } from './contract.js';
 import { compareCodeUnits, textHash } from './ids.js';
+import { LENGTH_CHECK_OFF, lengthLimitFor, type LengthCheckConfig } from './lengthCheck.js';
 import { confirmCodes, hasHardIssues, precheck, type PrecheckIssue, type PrecheckOptions } from './precheck.js';
 import type { LocHubStore } from './store.js';
+import { bandFor } from './triage.js';
 
 export class CellActionError extends Error {
   constructor(
@@ -50,33 +52,41 @@ function requireUnit(store: LocHubStore, unitId: string): Unit {
   return unit;
 }
 
-// The precheck inputs that come from the store: the culture's DNT glossary terms and the plural categories the
-// engine reported on the last Push (Node's own answer until one did). Every precheck caller goes through this.
-export function precheckOptionsFor(store: LocHubStore, culture: Culture): PrecheckOptions {
-  return { dntTerms: dntTermsOf(store, culture), plurals: (type) => store.pluralCategoriesFor(culture, type) };
+// The precheck inputs for one unit: the culture's DNT glossary terms and the plural categories the engine reported on
+// the last Push (Node's own answer until one did), both from the store, and the unit's Length Check limit from the
+// service config. Every precheck caller goes through this, so the cell panel, Save/Approve and AI drafts agree.
+export function precheckOptionsFor(store: LocHubStore, culture: Culture, unit: Unit, lengthCheck: LengthCheckConfig): PrecheckOptions {
+  const options: PrecheckOptions = { dntTerms: dntTermsOf(store, culture), plurals: (type) => store.pluralCategoriesFor(culture, type) };
+  const limit = lengthLimitFor(unit, culture, lengthCheck);
+  if (limit !== null) options.length = { limit, severity: lengthCheck.mode === 'confirm' ? 'confirm' : 'soft' };
+  return options;
 }
 
 // The one precheck call approveCell/editCell and the read-only check route all run, so the three can never drift.
-export function checkTranslation(store: LocHubStore, culture: Culture, unit: Unit, text: string): PrecheckIssue[] {
-  return precheck(unit.source, text, culture, precheckOptionsFor(store, culture));
+export function checkTranslation(store: LocHubStore, culture: Culture, unit: Unit, text: string, lengthCheck: LengthCheckConfig): PrecheckIssue[] {
+  return precheck(unit.source, text, culture, precheckOptionsFor(store, culture, unit, lengthCheck));
 }
 
-// POST /api/cells/:culture/:unitId/check: same 404 as approve/edit/reject, no store write.
-export function checkCell(store: LocHubStore, culture: Culture, unitId: string, text: string): PrecheckIssue[] {
-  return checkTranslation(store, culture, requireUnit(store, unitId), text);
+// POST /api/cells/:culture/:unitId/check: same 404 as approve/edit/reject, no store write. The Length Check defaults to
+// off here and in approveCell/editCell only for callers with no service config (tests, the offline demo); every
+// server route passes the configured one.
+export function checkCell(store: LocHubStore, culture: Culture, unitId: string, text: string, lengthCheck: LengthCheckConfig = LENGTH_CHECK_OFF): PrecheckIssue[] {
+  return checkTranslation(store, culture, requireUnit(store, unitId), text, lengthCheck);
 }
 
 // The human gate. A hard issue (Unreal rejects the text or prints it broken) is refused whatever `accept` says. A
 // confirm issue (valid for Unreal, probably a mistake) passes only when `accept` names every confirm code of this
 // very text, so a card that checked an older draft cannot approve issues it never showed. Returns the confirm codes
-// the human accepted, for the event.
-function checkOrThrow(store: LocHubStore, culture: Culture, unit: Unit, text: string, accept: readonly string[]): string[] {
-  const issues = checkTranslation(store, culture, unit, text);
+// the human accepted (for the event) together with the full issue list (editCell uses it to re-band the cell).
+function checkOrThrow(
+  store: LocHubStore, culture: Culture, unit: Unit, text: string, accept: readonly string[], lengthCheck: LengthCheckConfig,
+): { issues: PrecheckIssue[]; accepted: string[] } {
+  const issues = checkTranslation(store, culture, unit, text, lengthCheck);
   if (hasHardIssues(issues)) throw new CellActionError('Translation fails the format check', 422, issues);
   const accepted = confirmCodes(issues);
   const unconfirmed = accepted.filter((code) => !accept.includes(code));
   if (unconfirmed.length > 0) throw new CellActionError(`Confirm these warnings to go ahead anyway: ${unconfirmed.join(', ')}`, 422, issues);
-  return accepted;
+  return { issues, accepted };
 }
 
 function commit(store: LocHubStore, before: Cell, after: Cell, action: CellEventAction, actor: string, accepted: readonly string[] = []): Cell {
@@ -94,6 +104,33 @@ function commit(store: LocHubStore, before: Cell, after: Cell, action: CellEvent
   return after;
 }
 
+// The cell an Approve leaves: same text and provenance, re-based on the current source. Shared with
+// POST /api/import (exchange.ts), whose 'approved' outcome is exactly this action.
+export function approvedCell(unit: Unit, cell: Cell): Cell {
+  return { ...cell, status: 'approved', basedOnSourceRev: unit.sourceRev, basedOnSource: unit.source, qaFlags: keepAudit(cell), revision: cell.revision + 1 };
+}
+
+// The cell a human Edit leaves: the reviewer's text, the AI's leftovers cleared. Shared with POST /api/import
+// (exchange.ts), whose 'changed' and 'changed_approved' outcomes build on this before optionally re-marking it approved.
+export function editedCell(unit: Unit, cell: Cell, text: string, actor: string): Cell {
+  return {
+    ...cell,
+    text,
+    status: 'edited',
+    basedOnSourceRev: unit.sourceRev,
+    basedOnSource: unit.source,
+    provenance: `human:${actor}`,
+    ambiguity: 'none',
+    alts: [],
+    question: '',
+    note: '',
+    suggestion: '',
+    judgeIssues: [],
+    qaFlags: keepAudit(cell),
+    revision: cell.revision + 1,
+  };
+}
+
 // A needs_fix cell is re-checked like any other: its text may pass now (the glossary changed since), or carry only
 // confirm issues a human may accept.
 export function approveCell(
@@ -103,20 +140,14 @@ export function approveCell(
   actor: string,
   expected?: ExpectedRevision,
   accept: readonly string[] = [],
+  lengthCheck: LengthCheckConfig = LENGTH_CHECK_OFF,
 ): Cell {
   const unit = requireUnit(store, unitId);
   const cell = store.getCell(culture, unitId);
   checkFresh(unit, cell, expected);
   if (cell.text.length === 0) throw new CellActionError('Nothing to approve');
-  const accepted = checkOrThrow(store, culture, unit, cell.text, accept);
-  return commit(
-    store,
-    cell,
-    { ...cell, status: 'approved', basedOnSourceRev: unit.sourceRev, basedOnSource: unit.source, qaFlags: keepAudit(cell), revision: cell.revision + 1 },
-    'approve',
-    actor,
-    accepted,
-  );
+  const { accepted } = checkOrThrow(store, culture, unit, cell.text, accept, lengthCheck);
+  return commit(store, cell, approvedCell(unit, cell), 'approve', actor, accepted);
 }
 
 export function editCell(
@@ -127,34 +158,17 @@ export function editCell(
   actor: string,
   expected?: ExpectedRevision,
   accept: readonly string[] = [],
+  lengthCheck: LengthCheckConfig = LENGTH_CHECK_OFF,
 ): Cell {
   const unit = requireUnit(store, unitId);
   const cell = store.getCell(culture, unitId);
   checkFresh(unit, cell, expected);
-  const accepted = checkOrThrow(store, culture, unit, text, accept);
-  return commit(
-    store,
-    cell,
-    {
-      ...cell,
-      text,
-      status: 'edited',
-      basedOnSourceRev: unit.sourceRev,
-      basedOnSource: unit.source,
-      provenance: `human:${actor}`,
-      ambiguity: 'none',
-      alts: [],
-      question: '',
-      note: '',
-      suggestion: '',
-      judgeIssues: [],
-      qaFlags: keepAudit(cell),
-      revision: cell.revision + 1,
-    },
-    'edit',
-    actor,
-    accepted,
-  );
+  const { issues, accepted } = checkOrThrow(store, culture, unit, text, accept, lengthCheck);
+  // "Existing data" (length-check design): the next job or edit re-bands the cell — a human edit is freshly
+  // checked, so its review priority reflects what the check finds now (e.g. a soft too_long lands it in Y),
+  // not whatever band the cell carried before the edit.
+  const band = bandFor({ unit, ambiguity: 'none', precheck: issues, judge: [], refused: false });
+  return commit(store, cell, { ...editedCell(unit, cell, text, actor), band }, 'edit', actor, accepted);
 }
 
 export function rejectCell(store: LocHubStore, culture: Culture, unitId: string, note: string, actor: string, expected?: ExpectedRevision): Cell {

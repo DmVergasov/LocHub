@@ -92,7 +92,97 @@ the editor for an instant on-screen preview — without doing a full Pull. It sk
 does nothing if the editor is not connected. Use it to spot-check how a batch of translations actually looks in
 the game before publishing it through Pull.
 
-![Grid overview](images/07_grid_overview.png)
+![Grid overview](images/01_grid_overview.png)
+
+## Export and import (CSV, XLIFF)
+
+Hand strings to human translators — a vendor working in a CAT tool (Trados, memoQ, Phrase, Crowdin) or volunteers in
+Excel or Google Sheets — and bring their work back through the same format checks as your own edits.
+
+### Export
+
+**Export…** in the Grid toolbar opens a small panel:
+
+- **Culture** — the culture to export (the Grid's active culture by default).
+- **Format** — **CSV** for spreadsheets, or **XLIFF 1.2** for CAT tools.
+- **Strings** — **Strings matching the current filters** (exactly the rows the Grid shows right now, whichever culture
+  you export) or **All strings**.
+
+The file is saved as `lochub-<culture>.csv` or `lochub-<culture>.xlf`, in UTF-8.
+
+**CSV columns**, in this order: `namespace`, `key`, `source`, `translation`, `status`, `context` (where the string
+comes from), `notes` (developer notes), `max_length` (the UI length limit, when Length Check gives the string one),
+`lochub_id` and `lochub_revision`. Keep `lochub_id` and `lochub_revision` in the file you get back: they identify the
+string and let LocHub notice a string that changed while the file was away. A cell that starts with `=`, `+`, `-` or
+`@` is written with a leading tab, so a spreadsheet does not run it as a formula; the import removes exactly that tab.
+
+**XLIFF 1.2**: one `<trans-unit>` per string, with the developer notes and the origin as `<note>`s, the UI length
+limit as `maxwidth`, and `approved="yes"` on approved strings. The target `state` follows the LocHub status:
+
+| LocHub status | XLIFF `state` |
+|---|---|
+| Draft, Needs fix | `needs-review-translation` |
+| Edited, Human | `translated` |
+| Approved | `final` |
+| Rejected, Outdated | `needs-translation` |
+
+Format arguments without a modifier (`{Name}`, `{0}`) and rich-text tags (`<Bold>`, `</>`, `<img id="coin"/>`) are
+written as protected `<ph>` placeholders, so the CAT tool keeps them intact. An argument with a plural, ordinal or
+gender modifier (`{Count}|plural(one=…,other=…)`) stays plain text, since its branches need translating; the format
+check on import catches a broken one. XLIFF cannot store a few control characters at all; if a string holds one, the
+export names it — export CSV instead, or filter that string out.
+
+In both formats, a translation whose source text changed since it was made reads **outdated** (CSV `status`) /
+`needs-translation` (XLIFF `state`).
+
+### Import
+
+**Import…** in the Grid toolbar reads a `.csv`, `.xlf`, `.xliff` or `.xml` (XLIFF) file into the Grid's active
+culture. Nothing changes until you confirm: LocHub first shows a preview.
+
+- A CSV needs a `translation` column and either `lochub_id` or both `namespace` and `key`. The column order does not
+  matter; columns LocHub does not know are listed as ignored. Write `approved` in the `status` column to approve a
+  string along with its translation.
+- An XLIFF file whose `target-language` is another culture is refused before anything is sent. `approved="yes"` on a
+  `<trans-unit>` approves the string. A target the CAT tool pre-filled with the source text and left in state `new` or
+  `needs-translation` counts as no translation.
+- The file can be UTF-8 (with or without a BOM) or, for XLIFF, UTF-16. In the editor tab, the file picker reads files
+  up to 10 MB.
+- Opening the CSV directly in Excel or Google Sheets can turn `lochub_id` into a number (and a `source` or
+  `translation` cell that looks like a date or a fraction into one too); reopen it instead through **Data > From
+  Text/CSV** with every column set to **Text**. If an id gets mangled anyway, the import still finds the string by
+  its `namespace` and `key`.
+
+The preview sorts every string of the file into groups:
+
+| Group | What it means |
+|---|---|
+| **Changed** | A new translation; marked "(approved)" when the file approves it too |
+| **Approved** | The same text as in LocHub, and the file approves it |
+| **Unchanged** | Nothing to do |
+| **Skipped** | Not imported: the source text changed since the export, the string is not in the project, the translation is empty (an import never clears a translation), or the text has a problem Unreal would reject (see [Format checks](#format-checks)) |
+| **Conflicts** | The string changed in LocHub after the file was exported: it has a newer revision, or — for a file without `lochub_revision` / `lochub:revision` — a history entry after the XLIFF file's `date` |
+| **Needs confirmation** | The text has warnings only (see [Format checks](#format-checks)) |
+
+To import, enter your **Reviewer name** (required; the browser remembers it): it is recorded on every imported string
+and in its history. **Overwrite conflicts (N)** imports the conflicting strings too; **Import anyway: N strings with
+warnings** imports the strings whose only issues are warnings. Each checkbox updates the preview, so what you see is
+what **Import** does. Strings with a problem Unreal would reject are never imported.
+
+What an import does: a changed translation becomes **Edited** (or **Approved**, when the file approves it), written by
+you; approving an unchanged translation makes it **Approved**. A translation the file marks approved still lands as
+plain **Edited** when LocHub had already approved a different text for that string, or when the row only got in
+because you checked **Overwrite conflicts** — either way the approval in the file refers to a string LocHub has since
+changed, so a reviewer approves the new text in LocHub instead. Either way the string is human work that translation
+jobs never overwrite, and its translation counts as made for the current source text. The Grid refreshes when the
+import is done. If the LocHub data files changed on disk while the service ran (a source-control sync), the import is
+refused and nothing is written. **Import** refuses the same way if the strings themselves changed since the preview
+was shown — another edit, an AI job, a Push, or a retry after that files-changed refusal: nothing is written, and
+the panel shows the fresh preview so you can check it before trying again.
+
+![Export panel](images/12_export_dialog.png)
+
+![Import preview](images/13_import_preview.png)
 
 ## The Review queue
 
@@ -134,7 +224,7 @@ rejects it) — except `Esc`, which always works and blurs the field.
 If a job finishes and re-sorts the queue while you are reviewing, the queue keeps you on the same string rather
 than jumping you to whatever now occupies the same numeric position.
 
-![Review queue](images/07_review_queue.png)
+![Review queue](images/06_review_queue.png)
 
 ## The cell panel
 
@@ -144,8 +234,10 @@ translation:
 - **Header** — namespace / key, the triage band chip (hidden in the Review queue), the status chip, and an
   "outdated" chip if the source moved since this text was translated.
 - **Source** — the English text; if outdated, also "Translated from: \<the older source text\>".
-- **Translation** — an editable text box, the format check of the current text (it runs as the panel opens and
-  again as you type; see [Format checks](#format-checks)), and the action buttons:
+- **Translation** — an editable text box, a **length counter** under it when the string has a Length Check limit
+  (visible characters of your text / the limit, highlighted once the text is over), the format check of the current
+  text (it runs as the panel opens and again as you type; see [Format checks](#format-checks)), and the action
+  buttons:
   - **Approve (A)** — approves the text as shown. If you have edited the box first, this instead saves your edit
     and approves it (a human edit is recorded, not a plain approval). Reads **Approve anyway** when the text has
     only warnings.
@@ -177,7 +269,7 @@ If the string changed on the service since the panel loaded (someone else approv
 action you take is refused with a message explaining the string changed, and the panel refreshes to the current
 text instead of silently overwriting it.
 
-![Cell panel](images/07_cell_panel.png)
+![Cell panel](images/14_cell_panel.png)
 
 ## Format checks
 
@@ -213,6 +305,16 @@ anyway**. Clicking one records the warnings you confirmed in the string's histor
 text with warnings; it shows "Check the warnings, then click Approve anyway." If the warnings changed since the
 panel checked the text (for example, someone added a glossary term), the service refuses the click and shows the
 new list.
+
+**Too long for the UI** (`too_long`, from the [Length Check](06_Settings_Reference.md#length-check)): the text has
+more visible characters than the string's limit, for example "Too long for the UI: 40/19 characters (Length Check in
+Project Settings)". With **Length Severity** set to **Warning** (the default) it is a hint: it shows in the problem
+list, puts the string in band Y and blocks nothing. With **Must Confirm** it is a warning like the ones above: the
+buttons read **Approve anyway** and **Save anyway**. The counter under the edit box shows the same count while you
+type. Placeholders and tags count 0 and Chinese, Japanese and Korean characters count 2, so the counter may differ
+from a plain character count.
+
+![A translation over its Length Check limit](images/16_length_check_hint.png)
 
 A translation job holds its own drafts to both kinds: a draft with a problem or a warning goes back to the model
 for a fix and, if it still has one, is marked **Needs fix** — nothing suspicious ships without a human deciding.

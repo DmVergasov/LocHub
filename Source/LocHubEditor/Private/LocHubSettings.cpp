@@ -48,6 +48,8 @@ FString ULocHubSettings::AiProviderToString(const ELocHubAiProvider InProvider)
 		return TEXT("deepseek");
 	case ELocHubAiProvider::Gemini:
 		return TEXT("gemini");
+	case ELocHubAiProvider::Custom:
+		return TEXT("custom");
 	case ELocHubAiProvider::Anthropic:
 	default:
 		return TEXT("anthropic");
@@ -66,6 +68,32 @@ FString ULocHubSettings::AnthropicAuthToString(const ELocHubAnthropicAuth InAuth
 	}
 }
 
+FString ULocHubSettings::CustomKeyHeaderToString(const ELocHubCustomKeyHeader InKeyHeader)
+{
+	switch (InKeyHeader)
+	{
+	case ELocHubCustomKeyHeader::ApiKey:
+		return TEXT("api-key");
+	case ELocHubCustomKeyHeader::Bearer:
+	default:
+		return TEXT("bearer");
+	}
+}
+
+FString ULocHubSettings::StructuredOutputToString(const ELocHubStructuredOutput InMode)
+{
+	switch (InMode)
+	{
+	case ELocHubStructuredOutput::JsonObject:
+		return TEXT("json_object");
+	case ELocHubStructuredOutput::PromptOnly:
+		return TEXT("prompt_only");
+	case ELocHubStructuredOutput::JsonSchema:
+	default:
+		return TEXT("json_schema");
+	}
+}
+
 const FLocHubAiModels& ULocHubSettings::GetActiveModels() const
 {
 	switch (AiProvider)
@@ -78,6 +106,8 @@ const FLocHubAiModels& ULocHubSettings::GetActiveModels() const
 		return DeepSeekModels;
 	case ELocHubAiProvider::Gemini:
 		return GeminiModels;
+	case ELocHubAiProvider::Custom:
+		return CustomModels;
 	case ELocHubAiProvider::Anthropic:
 	default:
 		return AnthropicModels;
@@ -96,8 +126,34 @@ const FString& ULocHubSettings::GetActiveApiKey() const
 		return DeepSeekApiKey;
 	case ELocHubAiProvider::Gemini:
 		return GeminiApiKey;
+	case ELocHubAiProvider::Custom:
+		return CustomApiKey;
 	case ELocHubAiProvider::Anthropic:
 	default:
 		return AnthropicApiKey;
+	}
+}
+
+FString ULocHubSettings::LengthScopeToString(const ELocHubLengthScope InScope)
+{
+	switch (InScope)
+	{
+	case ELocHubLengthScope::AllStrings:
+		return TEXT("all");
+	case ELocHubLengthScope::UiStrings:
+	default:
+		return TEXT("ui");
+	}
+}
+
+FString ULocHubSettings::LengthSeverityToString(const ELocHubLengthSeverity InSeverity)
+{
+	switch (InSeverity)
+	{
+	case ELocHubLengthSeverity::MustConfirm:
+		return TEXT("confirm");
+	case ELocHubLengthSeverity::Warning:
+	default:
+		return TEXT("warning");
 	}
 }

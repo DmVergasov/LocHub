@@ -10,16 +10,20 @@ import {
   type BridgeCommandName,
   type Cell,
   type CoverageFinding,
+  type EndpointHealth,
   type ExportAck,
   type GlossaryTerm,
   type InboxItem,
   type ReleasePolicy,
   type Snapshot,
 } from './contract.js';
+import { probeEndpoint, reduceBaseUrl } from './customEndpoint.js';
 import { Fastify } from './deps.js';
 import { assertWithinBudget, BudgetExceededError, estimateJob, TokenCountCache, type JobEstimate } from './estimate.js';
+import { ImportPreviewStaleError, ImportRequestError, parseImportRequest, runImport, type TranslationCheck } from './exchange.js';
 import { compareCodeUnits } from './ids.js';
 import { runTranslateJob, type JobDefaults, type JobOptions, type JobProgress, type JobReport } from './job.js';
+import { lengthArgsOf, lengthLimitFor } from './lengthCheck.js';
 import type { LlmClient } from './llm.js';
 import { BATCH_UNAVAILABLE_MESSAGE } from './llmShared.js';
 import { answerQuestion, dismissQuestion, markApplied, recordQuestion } from './memory.js';
@@ -66,6 +70,9 @@ export interface ServerDeps {
   // ai.briefSha1 in /api/health. Defaults to the SHA-1 of an empty brief when omitted (tests only; cli.ts always
   // computes it, even for an absent or empty brief file).
   briefSha1?: string;
+  // Custom endpoints only: the fetch the startup GET {base}/models probe uses. Injectable so tests never reach the
+  // network; defaults to the global fetch.
+  endpointFetch?: typeof fetch;
 }
 
 interface JobRecord {
@@ -158,6 +165,15 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   const subscriptionHealthPromise: Promise<{ ready: boolean; detail: string }> | undefined =
     ai.auth === 'subscription' ? (deps.authProbe ?? (() => checkClaudeAuthStatus()))() : undefined;
 
+  // Custom endpoints only: one GET {base}/models at startup, in the background -- readiness never waits for it,
+  // and /api/health reports 'checking' until it answers.
+  let endpointHealth: EndpointHealth | undefined = ai.custom ? { url: reduceBaseUrl(ai.custom.baseUrl), status: 'checking' } : undefined;
+  if (ai.custom) {
+    void probeEndpoint(ai.custom, [ai.translateModel, ai.judgeModel], env.LOCHUB_API_KEY, deps.endpointFetch).then((probed) => {
+      endpointHealth = probed;
+    });
+  }
+
   // Every route that takes a culture funnels through this before it touches the store. Sends 400 and returns
   // false on failure so the caller can `if (!cultureGuard(...)) return;`. Also consults the cultures
   // of jobs that are starting or running: a job started as "pt-br" has no cells/glossary/style file
@@ -200,13 +216,28 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   // Target cultures of the last real Push; like coverage, it lives in memory only.
   let lastPush: { nativeCulture: string; cultures: string[] } = { nativeCulture: '', cultures: [] };
 
+  // Cultures of the last Push plus every culture that already has cells, minus the native (source) culture: the
+  // same set /api/meta lists (so the Grid can only ever open one of these), shared here so /api/import refuses
+  // anything else too.
+  function translationCultures(): Set<string> {
+    const cultures = new Set<string>(lastPush.cultures);
+    for (const [culture, cells] of store.cells) if (cells.size > 0) cultures.add(culture);
+    cultures.delete(lastPush.nativeCulture);
+    return cultures;
+  }
+
   app.get('/api/health', async () => {
+    // The Custom endpoint settings stay out of the reply: the base URL may carry a path or a query with a token.
+    const { custom, ...aiPublic } = ai;
     const aiHealth: AiHealth = {
-      ...ai,
+      ...aiPublic,
       batch: supportsBatch(ai),
       briefSha1,
       keyId: keyIdOf(env.LOCHUB_API_KEY),
-      ...(subscriptionHealthPromise ? await subscriptionHealthPromise : apiKeyHealth(env)),
+      lengthArgs: lengthArgsOf(jobDefaults.lengthCheck),
+      ...(custom ? { customSettingsId: custom.settingsId } : {}),
+      ...(endpointHealth ? { endpoint: endpointHealth } : {}),
+      ...(subscriptionHealthPromise ? await subscriptionHealthPromise : apiKeyHealth(env, ai.provider)),
     };
     return {
       ok: true,
@@ -287,7 +318,9 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       );
     const limit = intParam(q.limit, 200, 1, 1000);
     const offset = intParam(q.offset, 0, 0, Number.MAX_SAFE_INTEGER);
-    return { total: rows.length, rows: rows.slice(offset, offset + limit) };
+    // Only for the page returned: every page request would otherwise measure every unit of the project again.
+    const page = rows.slice(offset, offset + limit).map((row) => ({ ...row, lengthLimit: lengthLimitFor(row.unit, culture, jobDefaults.lengthCheck) }));
+    return { total: rows.length, rows: page };
   });
 
   app.post('/api/cells/:culture/:unitId/:action', async (request, reply) => {
@@ -310,10 +343,10 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     const actor = typeof body.actor === 'string' ? body.actor : 'reviewer';
     try {
       let cell: Cell;
-      if (action === 'approve') cell = approveCell(store, culture, unitId, actor, expected, accept);
+      if (action === 'approve') cell = approveCell(store, culture, unitId, actor, expected, accept, jobDefaults.lengthCheck);
       else if (action === 'edit') {
         if (typeof body.text !== 'string') return reply.code(400).send({ error: 'text is required' });
-        cell = editCell(store, culture, unitId, body.text, actor, expected, accept);
+        cell = editCell(store, culture, unitId, body.text, actor, expected, accept, jobDefaults.lengthCheck);
       } else if (action === 'reject') cell = rejectCell(store, culture, unitId, typeof body.note === 'string' ? body.note : '', actor, expected);
       else return reply.code(404).send({ error: `Unknown action ${action}` });
       store.save();
@@ -352,7 +385,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     // locally (approxInputTokens), which is exactly why a missing key used to fail the job silently instead of
     // this request. Subscription keeps its current path.
     if (ai.auth === 'api') {
-      const health = apiKeyHealth(env);
+      const health = apiKeyHealth(env, ai.provider);
       if (!health.ready) return reply.code(400).send({ error: 'ai_not_ready', message: health.detail });
     }
     // skipEstimate (estimate-speed-brief.md §3): the job starts with no provider calls at all, so maxUsd is
@@ -490,7 +523,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     // Anthropic with an API key; every other provider estimates locally, but a bad key must still fail this
     // request rather than let the job start.
     if (ai.auth === 'api') {
-      const health = apiKeyHealth(env);
+      const health = apiKeyHealth(env, ai.provider);
       if (!health.ready) return reply.code(400).send({ error: 'ai_not_ready', message: health.detail });
     }
     if (!cultureGuard(opts.culture, reply)) return;
@@ -504,7 +537,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     // Same ai_not_ready gate as POST /api/jobs and /api/jobs/estimate (I-1): a missing key must fail this
     // request, not reach retranslateWithNote's model call with none.
     if (ai.auth === 'api') {
-      const health = apiKeyHealth(env);
+      const health = apiKeyHealth(env, ai.provider);
       if (!health.ready) return reply.code(400).send({ error: 'ai_not_ready', message: health.detail });
     }
     const body = (request.body ?? {}) as { note?: unknown; asRule?: unknown };
@@ -533,9 +566,30 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     const body = (request.body ?? {}) as { text?: unknown };
     if (typeof body.text !== 'string') return reply.code(400).send({ error: 'text is required' });
     try {
-      return { issues: checkCell(store, culture, unitId, body.text) };
+      return { issues: checkCell(store, culture, unitId, body.text, jobDefaults.lengthCheck) };
     } catch (error) {
       return sendCellError(reply, error);
+    }
+  });
+
+  // Translation exchange (CONTRACT.md): a translator's CSV/XLIFF strings, parsed by the web app. A dry run only
+  // reports; an apply writes every applied row in one save (runImport).
+  app.post('/api/import', async (request, reply) => {
+    try {
+      const body = parseImportRequest(request.body);
+      if (!cultureGuard(body.culture, reply)) return;
+      if (!translationCultures().has(body.culture)) return reply.code(400).send({ error: `${body.culture} is not a translation culture of this project` });
+      // A dry run never stages a write (runImport only touches the store when !dryRun), so it is exempt, like Push's
+      // own dry run; a real import must be checked before runImport stages anything (server.ts's edit/approve/reconcile
+      // routes check the same way before their own writes).
+      if (!body.dryRun) store.assertFresh();
+      // Exactly the call the /check route makes, so an import can never pass a text Save would refuse.
+      const check: TranslationCheck = (unit, text) => checkCell(store, body.culture, unit.id, text, jobDefaults.lengthCheck);
+      return runImport(store, body, check);
+    } catch (error) {
+      if (error instanceof ImportRequestError) return reply.code(400).send({ error: error.message });
+      if (error instanceof ImportPreviewStaleError) return reply.code(409).send({ error: 'preview_stale', message: error.message, result: error.result });
+      throw error;
     }
   });
 
@@ -611,10 +665,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   // Only spellings the culture guard accepts are listed: the web app loads every listed culture, and one 400 (a pushed
   // "FR" next to a stored "fr", or a malformed code) would fail the whole grid.
   app.get('/api/meta', async () => {
-    const cultures = new Set<string>(lastPush.cultures);
-    for (const [culture, cells] of store.cells) if (cells.size > 0) cultures.add(culture);
-    cultures.delete(lastPush.nativeCulture);
-    const usable = [...cultures].filter((culture) => checkCulture(store, culture) === null);
+    const usable = [...translationCultures()].filter((culture) => checkCulture(store, culture) === null);
     return { nativeCulture: lastPush.nativeCulture, cultures: usable.sort(compareCodeUnits) };
   });
 

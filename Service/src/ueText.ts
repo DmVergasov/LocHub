@@ -98,7 +98,8 @@ function scanPattern(s: string, out: ParsedPattern, seen: Set<string>): void {
   }
 }
 
-function readModifier(s: string, start: number): { name: string; body: string; end: number } | undefined {
+// Also used by lengthCheck.ts visibleLength, which walks the same argument/modifier structure.
+export function readModifier(s: string, start: number): { name: string; body: string; end: number } | undefined {
   const match = /^[A-Za-z]+/.exec(s.slice(start));
   if (!match) return undefined;
   let i = start + match[0].length;
@@ -126,7 +127,7 @@ function readModifier(s: string, start: number): { name: string; body: string; e
   return undefined;
 }
 
-function parseModifier(arg: string, name: string, body: string): ArgModifier {
+export function parseModifier(arg: string, name: string, body: string): ArgModifier {
   const lower = name.toLowerCase();
   const kind: ModifierKind =
     lower === 'plural' || lower === 'ordinal' || lower === 'gender' || lower === 'hpp' ? lower : 'other';

@@ -140,6 +140,13 @@ bool FLocHubServiceClient::ParseHealth(const FString& InJson, FLocHubHealth& Out
 		(*AiObject)->TryGetStringField(TEXT("judgeModel"), Health.AiJudgeModel);
 		(*AiObject)->TryGetStringField(TEXT("briefSha1"), Health.AiBriefSha1);
 		Health.bHasAiKeyId = (*AiObject)->TryGetStringField(TEXT("keyId"), Health.AiKeyId);
+		Health.bHasAiLengthArgs = (*AiObject)->TryGetStringField(TEXT("lengthArgs"), Health.AiLengthArgs);
+		Health.bHasAiCustomSettingsId = (*AiObject)->TryGetStringField(TEXT("customSettingsId"), Health.AiCustomSettingsId);
+		const TSharedPtr<FJsonObject>* EndpointObject = nullptr;
+		if ((*AiObject)->TryGetObjectField(TEXT("endpoint"), EndpointObject) && EndpointObject != nullptr && EndpointObject->IsValid())
+		{
+			(*EndpointObject)->TryGetStringField(TEXT("url"), Health.AiEndpointUrl);
+		}
 	}
 	OutHealth = MoveTemp(Health);
 	return true;

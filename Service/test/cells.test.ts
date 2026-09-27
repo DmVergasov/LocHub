@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { applyExportAck, approveCell, CellActionError, checkCell, editCell, exportForPull, rejectCell, StaleCellError } from '../src/cells.js';
+import { LENGTH_CHECK_OFF, type LengthCheckConfig } from '../src/lengthCheck.js';
 import type { SnapshotEntry } from '../src/contract.js';
 import { textHash, unitIdOf } from '../src/ids.js';
 import { applySnapshot } from '../src/push.js';
@@ -42,9 +43,11 @@ describe('cell actions', () => {
     expect(approveCell(store, 'ru', idA, 'me')).toMatchObject({ status: 'approved' });
   });
 
-  it('accepts a valid edit and clears AI metadata', () => {
+  // The cell started band Y from an older AI draft (beforeEach); a clean edit re-bands it (M-7-web: an edit
+  // re-checks the review band, it does not keep whatever the cell had before).
+  it('accepts a valid edit, clears AI metadata and re-bands the cell from the fresh check', () => {
     const cell = editCell(store, 'ru', idA, 'Ещё {Count} тюков', 'me');
-    expect(cell).toMatchObject({ status: 'edited', provenance: 'human:me', band: 'Y', judgeIssues: [], alts: [], qaFlags: ['audit'] });
+    expect(cell).toMatchObject({ status: 'edited', provenance: 'human:me', band: 'G', judgeIssues: [], alts: [], qaFlags: ['audit'] });
   });
 
   it('rejects an edit that breaks arguments with the issues attached', () => {
@@ -300,5 +303,40 @@ describe('export for Pull', () => {
     applyExportAck(store, { culture: 'ru', written: [{ unitId: idA, translation: 'Привет' }], rejected: [] });
     const exported = store.readEvents('ru', idA).filter((e) => e.action === 'exported');
     expect(exported).toEqual([expect.objectContaining({ before: 'Здравствуй', after: 'Привет' })]);
+  });
+});
+
+describe('cell actions: Length Check', () => {
+  // The fixture's units carry no LocHub.Kind, so the tests measure All strings. BACK has 4 visible characters:
+  // ceil(4 x 1.3) + 4 = 10.
+  const CONFIRM_ALL: LengthCheckConfig = { ...LENGTH_CHECK_OFF, mode: 'confirm', scope: 'all' };
+  const TOO_LONG = 'ВЕРНУТЬСЯ НАЗАД'; // 15 visible characters
+  const ISSUE = { code: 'too_long', severity: 'confirm', message: 'Too long for the UI: 15/10 characters (Length Check in Project Settings)' };
+  const thrown = (action: () => unknown): CellActionError => {
+    try {
+      action();
+    } catch (error) {
+      return error as CellActionError;
+    }
+    throw new Error('expected a CellActionError');
+  };
+
+  it('checkCell reports too_long with the configured severity, and nothing while the check is off', () => {
+    expect(checkCell(store, 'ru', idB, TOO_LONG, CONFIRM_ALL)).toEqual([ISSUE]);
+    expect(checkCell(store, 'ru', idB, TOO_LONG)).toEqual([]);
+  });
+
+  it('edit and approve refuse an over-limit text under Must Confirm until too_long is accepted', () => {
+    expect(thrown(() => editCell(store, 'ru', idB, TOO_LONG, 'me', undefined, [], CONFIRM_ALL)).issues).toEqual([ISSUE]);
+    // Accepting a confirm-level too_long still lands the edit in band R: the check found a real, unresolved
+    // concern (M-7-web), whoever confirmed it.
+    expect(editCell(store, 'ru', idB, TOO_LONG, 'me', undefined, ['too_long'], CONFIRM_ALL)).toMatchObject({ text: TOO_LONG, status: 'edited', band: 'R' });
+    expect(thrown(() => approveCell(store, 'ru', idB, 'me', undefined, [], CONFIRM_ALL)).issues).toEqual([ISSUE]);
+    expect(approveCell(store, 'ru', idB, 'me', undefined, ['too_long'], CONFIRM_ALL)).toMatchObject({ status: 'approved' });
+  });
+
+  it('a Warning too_long never blocks a human, and the edit lands in band Y (M-7-web)', () => {
+    const warning = { ...CONFIRM_ALL, mode: 'warning' as const };
+    expect(editCell(store, 'ru', idB, TOO_LONG, 'me', undefined, [], warning)).toMatchObject({ status: 'edited', band: 'Y' });
   });
 });

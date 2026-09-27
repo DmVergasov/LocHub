@@ -38,6 +38,7 @@ catch the problems; you review the result in one place and pull it back as plain
 - **Your glossary is followed.** Fixed terms and do-not-translate words go to the translator and the judge with
   every request; do-not-translate terms are also checked in code. Change a term, and every string that uses it
   is queued for re-translation in one click.
+- Translations that would overflow your UI are flagged, and the AI is told the length limit up front.
 - Human edits are never overwritten by the AI.
 - Changed source text marks its translations outdated; they are not shipped until updated.
 - You choose what ships: only approved strings, or everything that passed the checks.
@@ -47,11 +48,13 @@ catch the problems; you review the result in one place and pull it back as plain
 - Works in an editor tab: a fast grid, filters, and a keyboard-driven review queue.
 - Jump from a string to its asset or C++ line; preview a language in the editor live.
 - Glossary CSV import/export; the AI asks you questions instead of guessing.
+- Work with human translators: export to XLIFF or CSV, import their work back through the same checks.
 
 **Simple**
 - One click sets up your localization target. No accounts, no servers.
-- Bring your own key: Anthropic, OpenAI, xAI, DeepSeek or Google Gemini — or, for Anthropic, your own Claude
-  subscription via Claude Code, no key needed.
+- Bring your own key: Anthropic, OpenAI, xAI, DeepSeek, Google Gemini or any OpenAI-compatible endpoint,
+  including local models (Ollama, LM Studio) — or, for Anthropic, your own Claude subscription via Claude
+  Code, no key needed.
 - Output is ordinary archives and `.locres` — stop using LocHub any time.
 <!-- WHY-LOCHUB:END -->
 
@@ -67,11 +70,13 @@ catch the problems; you review the result in one place and pull it back as plain
 
 - Unreal Engine 5.6, 5.7 or 5.8.
 - Node.js 22.11 or newer (LocHub runs a small local service on `127.0.0.1`).
-- An API key for one of the supported AI providers — or, for Anthropic, a Claude Code CLI on your machine,
-  installed and signed in to your Claude subscription, instead of a key.
+- An API key for one of the supported AI providers — or any OpenAI-compatible endpoint, including a local model
+  server (Ollama, LM Studio) that needs no key — or, for Anthropic, a Claude Code CLI on your machine, installed
+  and signed in to your Claude subscription, instead of a key.
 
 Only what a translation needs — the strings, their notes and your glossary — leaves your machine, sent to your
-AI provider under your own key (or, under a Claude subscription, to your own signed-in Claude Code CLI).
+AI provider under your own key (or, under a Claude subscription, to your own signed-in Claude Code CLI). With a
+local model on a Custom endpoint, nothing leaves your machine at all.
 
 ## Key features (compact list for Fab's "Features" field)
 
@@ -83,7 +88,10 @@ AI provider under your own key (or, under a Claude subscription, to your own sig
 - Editor tab with a fast grid, keyboard-driven review queue, jump-to-source and live preview.
 - Glossary with CSV import/export, inbox for the AI's questions, coverage report of text that bypasses
   localization.
-- One-click target setup, no accounts or servers, five AI providers with your own key.
+- Export to XLIFF 1.2 or CSV for human translators; their work is imported back through the same checks.
+- UI length check: translations that would overflow the UI are flagged; the AI is told the limit.
+- One-click target setup, no accounts or servers, five AI providers with your own key or any OpenAI-compatible
+  endpoint, including local models.
 - Plain Unreal archives and `.locres` output; a commandlet for Push/Pull on CI.
 
 ## Tags
@@ -118,15 +126,16 @@ category picker when creating the listing; this document does not have access to
 - **Important/Additional Notes:**
   - Requires Node.js 22.11 or newer on the machine running the editor.
   - Requires your own API key for one of the supported AI providers (Anthropic, OpenAI, xAI, DeepSeek,
-    Google Gemini); LocHub does not include or resell access to any AI provider.
+    Google Gemini), or an OpenAI-compatible endpoint you run or rent (a local model needs no key); LocHub does
+    not include or resell access to any AI provider.
   - Optional, Anthropic only: instead of an API key, LocHub can authenticate through your own Claude
     subscription, by running the Claude Code CLI (`claude`) already installed and signed in on your
     machine. This is an external dependency only when that mode is selected; every other provider and
     Anthropic's own API-key mode need nothing beyond Node.js.
   - Your project's text strings are sent to the AI provider you configure, under your own key (or, under
     a Claude subscription, to your own signed-in Claude Code CLI), when you run a translation job.
-  - Network access is limited to the configured provider's API and to LocHub's own local service on
-    `127.0.0.1`.
+  - Network access is limited to the configured provider's API (for a Custom endpoint, the Base URL you set)
+    and to LocHub's own local service on `127.0.0.1`.
   - Tested on Windows only; the macOS and Linux builds come from the same source but are untested by the
     author.
 

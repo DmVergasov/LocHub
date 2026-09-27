@@ -5,10 +5,13 @@ import { describe, expect, it } from 'vitest';
 import { ResponseCache } from '../src/cache.js';
 import { editCell, rejectCell } from '../src/cells.js';
 import type { SnapshotEntry } from '../src/contract.js';
+import type { CustomEndpointConfig } from '../src/customEndpoint.js';
 import { unitIdOf } from '../src/ids.js';
 import { DEFAULT_JOB_OPTIONS, runTranslateJob, type JobOptions, type JobProgress } from '../src/job.js';
+import { LENGTH_CHECK_OFF, type LengthCheckConfig } from '../src/lengthCheck.js';
 import type { LlmOutcome, LlmRequest } from '../src/llm.js';
 import { answerQuestion, recordQuestion } from '../src/memory.js';
+import { OpenAiCompatibleLlmClient } from '../src/openaiCompatible.js';
 import { applySnapshot } from '../src/push.js';
 import { LocHubStore } from '../src/store.js';
 import { isAuditSample } from '../src/triage.js';
@@ -45,7 +48,7 @@ describe('runTranslateJob', () => {
     const report = await runTranslateJob(store, new FakeLlmClient((r) => translateAll(r)), cache, options());
     expect(report).toMatchObject({ requested: 3, written: 3, needsFix: 0, bands: { R: 0, Y: 0, G: 3 } });
     const cell = LocHubStore.load(store.dataDir).getCell('ru', unitIdOf('HW', 'A'));
-    expect(cell).toMatchObject({ text: 'ПАУЗА', status: 'ai_draft', band: 'G', provenance: 'ai:claude-opus-5-5+translate-v1', revision: 1 });
+    expect(cell).toMatchObject({ text: 'ПАУЗА', status: 'ai_draft', band: 'G', provenance: 'ai:claude-opus-5-5+translate-v2', revision: 1 });
   });
 
   // The brief is service config (JobOptions.brief), not store data: cultureContext takes it from opts, not
@@ -467,7 +470,9 @@ describe('runTranslateJob', () => {
     const report = await runTranslateJob(store, refusing, cache, options());
     expect(report.refused).toBe(1);
     const cell = store.getCell('ru', idA);
-    expect(cell).toMatchObject({ text: 'ПАУЗА (вручную)', status: 'edited', band: '', qaFlags: [], revision: 1 });
+    // band 'G': editCell now re-bands from its own fresh check (M-7-web) instead of leaving the cell's
+    // never-touched '' band in place.
+    expect(cell).toMatchObject({ text: 'ПАУЗА (вручную)', status: 'edited', band: 'G', qaFlags: [], revision: 1 });
     expect(store.readEvents('ru', idA)).toHaveLength(1);
   });
 });
@@ -604,5 +609,258 @@ describe('runTranslateJob progress', () => {
     const repairEvents = events.filter((e) => e.phase === 'repair');
     expect(repairEvents[0]).toMatchObject({ done: 0, total: 1 });
     expect(repairEvents.at(-1)).toMatchObject({ done: 1, total: 1 });
+  });
+});
+
+describe('runTranslateJob: Length Check on translation-memory reuse', () => {
+  // BACK has 4 visible characters: a 'ui' unit gets ceil(4 x 1.3) + 4 = 10; the donor text has 15.
+  const LONG_DONOR = 'ВЕРНУТЬСЯ НАЗАД';
+
+  function withLongDonor() {
+    const { store, cache } = setup([entry('A', 'BACK', 'ui'), entry('B', 'BACK', 'ui')]);
+    const idA = unitIdOf('HW', 'A');
+    store.putCell({ ...store.getCell('ru', idA), text: LONG_DONOR, status: 'approved', basedOnSourceRev: 1, basedOnSource: 'BACK' });
+    return { store, cache };
+  }
+
+  it('does not reuse a donor over the limit under Must Confirm: the string goes to the model', async () => {
+    const { store, cache } = withLongDonor();
+    const llm = new FakeLlmClient((r) => translateAll(r));
+    const lengthCheck: LengthCheckConfig = { ...LENGTH_CHECK_OFF, mode: 'confirm' };
+    const report = await runTranslateJob(store, llm, cache, options({ lengthCheck }));
+    expect(report.tm).toBe(0);
+    expect(store.getCell('ru', unitIdOf('HW', 'B')).text).toBe('НАЗАД');
+  });
+
+  it('still reuses it under Warning (a hint never blocks reuse), landing in band Y with too_long in its flags', async () => {
+    const { store, cache } = withLongDonor();
+    const report = await runTranslateJob(store, new FakeLlmClient((r) => translateAll(r)), cache, options({ lengthCheck: { ...LENGTH_CHECK_OFF, mode: 'warning' } }));
+    expect(report).toMatchObject({ tm: 1, bands: { Y: 1, G: 0 } });
+    expect(store.getCell('ru', unitIdOf('HW', 'B'))).toMatchObject({ text: LONG_DONOR, status: 'ai_draft', band: 'Y', qaFlags: ['tm', 'too_long'] });
+  });
+});
+
+describe('runTranslateJob: Length Check repair and prompt', () => {
+  // PAUSED has 6 visible characters: a 'ui' unit gets ceil(6 x 1.3) + 4 = 12.
+  const TOO_LONG_RU = 'ПРИОСТАНОВЛЕНО НАДОЛГО'; // 22 visible characters
+  const WARNING: LengthCheckConfig = { ...LENGTH_CHECK_OFF, mode: 'warning' };
+  const CONFIRM: LengthCheckConfig = { ...LENGTH_CHECK_OFF, mode: 'confirm' };
+  const translateCalls = (llm: FakeLlmClient) => llm.calls.filter((c) => !isJudgeRequest(c));
+
+  it('sends a soft too_long back for one repair and writes what stays too long as a Y draft', async () => {
+    const { store, cache } = setup([entry('A', 'PAUSED', 'ui')]);
+    const llm = new FakeLlmClient((r) => translateAll(r, () => TOO_LONG_RU));
+    const report = await runTranslateJob(store, llm, cache, options({ lengthCheck: WARNING }));
+    expect(translateCalls(llm)).toHaveLength(2);
+    expect(requestItems(translateCalls(llm)[1]!)[0]!.errors).toEqual([
+      'Too long for the UI: 22/12 characters (Length Check in Project Settings). Shorten it while keeping the meaning, every placeholder and every tag.',
+    ]);
+    expect(report).toMatchObject({ written: 1, needsFix: 0, bands: { Y: 1 } });
+    expect(store.getCell('ru', unitIdOf('HW', 'A'))).toMatchObject({ status: 'ai_draft', band: 'Y', qaFlags: ['too_long'] });
+  });
+
+  // I-3 (amendment 2): a repair round must never turn a good draft into a worse one. Round 0's draft only has
+  // the soft too_long issue (it kept {Count}); the one repair round this job gets drops {Count}, which is a
+  // blocking (confirm) issue. With no round left to try again, the pre-repair text must survive with its band Y.
+  it('restores the pre-repair text when the only repair round drops a placeholder', async () => {
+    const { store, cache } = setup([entry('C', '{Count} bales left', 'ui')]);
+    const TOO_LONG_WITH_COUNT = 'ОЧЕНЬ МНОГО ТЮКОВ СЕНА ОСТАЛОСЬ ВСЕГО {Count}';
+    const MISSING_COUNT = 'Осталось тюков сена';
+    const llm = new FakeLlmClient((r) => translateAll(r, () => (requestItems(r)[0]!.errors !== undefined ? MISSING_COUNT : TOO_LONG_WITH_COUNT)));
+    const report = await runTranslateJob(store, llm, cache, options({ lengthCheck: WARNING, maxRepairRounds: 1 }));
+    expect(translateCalls(llm)).toHaveLength(2);
+    expect(report).toMatchObject({ written: 1, needsFix: 0, bands: { Y: 1 } });
+    expect(store.getCell('ru', unitIdOf('HW', 'C'))).toMatchObject({ text: TOO_LONG_WITH_COUNT, status: 'ai_draft', band: 'Y', qaFlags: ['too_long'] });
+  });
+
+  it('writes the shorter wording the repair returns as a clean draft', async () => {
+    const { store, cache } = setup([entry('A', 'PAUSED', 'ui')]);
+    const llm = new FakeLlmClient((r) => translateAll(r, () => (requestItems(r)[0]!.errors !== undefined ? 'ПАУЗА' : TOO_LONG_RU)));
+    const report = await runTranslateJob(store, llm, cache, options({ lengthCheck: WARNING }));
+    expect(report).toMatchObject({ written: 1, bands: { G: 1 } });
+    expect(store.getCell('ru', unitIdOf('HW', 'A'))).toMatchObject({ text: 'ПАУЗА', status: 'ai_draft', band: 'G', qaFlags: [] });
+  });
+
+  it('under Must Confirm repairs in every round and writes what stays too long needs_fix in band R', async () => {
+    const { store, cache } = setup([entry('A', 'PAUSED', 'ui')]);
+    const llm = new FakeLlmClient((r) => translateAll(r, () => TOO_LONG_RU));
+    const report = await runTranslateJob(store, llm, cache, options({ lengthCheck: CONFIRM }));
+    expect(translateCalls(llm)).toHaveLength(3);
+    expect(report).toMatchObject({ written: 0, needsFix: 1, bands: { R: 1 } });
+    expect(store.getCell('ru', unitIdOf('HW', 'A'))).toMatchObject({ status: 'needs_fix', band: 'R', qaFlags: ['too_long'] });
+  });
+
+  it('under Must Confirm the needs_fix string goes back to the model on the next job', async () => {
+    const { store, cache } = setup([entry('A', 'PAUSED', 'ui')]);
+    await runTranslateJob(store, new FakeLlmClient((r) => translateAll(r, () => TOO_LONG_RU)), cache, options({ lengthCheck: CONFIRM }));
+    expect(store.getCell('ru', unitIdOf('HW', 'A')).status).toBe('needs_fix');
+    const next = new FakeLlmClient((r) => translateAll(r));
+    const report = await runTranslateJob(store, next, cache, options({ lengthCheck: CONFIRM }));
+    expect(translateCalls(next)).toHaveLength(1);
+    expect(report.written).toBe(1);
+    expect(store.getCell('ru', unitIdOf('HW', 'A'))).toMatchObject({ text: 'ПАУЗА', status: 'ai_draft', band: 'G' });
+  });
+
+  it('leaves a non-UI string alone under the UI scope', async () => {
+    const { store, cache } = setup([entry('A', 'PAUSED', 'text')]);
+    const llm = new FakeLlmClient((r) => translateAll(r, () => TOO_LONG_RU));
+    await runTranslateJob(store, llm, cache, options({ lengthCheck: WARNING }));
+    expect(translateCalls(llm)).toHaveLength(1);
+    expect(store.getCell('ru', unitIdOf('HW', 'A'))).toMatchObject({ status: 'ai_draft', band: 'G', qaFlags: [] });
+  });
+
+  it('sends maxLength for each item with a limit, only while Tell the Translator is on', async () => {
+    const idA = unitIdOf('HW', 'A');
+    const idB = unitIdOf('HW', 'B');
+    const firstRequestLimits = async (lengthCheck: LengthCheckConfig) => {
+      const { store, cache } = setup([entry('A', 'PAUSED', 'ui'), entry('B', 'BACK', 'text')]);
+      const llm = new FakeLlmClient((r) => translateAll(r));
+      await runTranslateJob(store, llm, cache, options({ lengthCheck }));
+      return Object.fromEntries(requestItems(translateCalls(llm)[0]!).map((i) => [i.id as string, i.maxLength]));
+    };
+    expect(await firstRequestLimits(WARNING)).toEqual({ [idA]: 12, [idB]: undefined });
+    expect(await firstRequestLimits({ ...WARNING, hint: false })).toEqual({ [idA]: undefined, [idB]: undefined });
+    // An older plugin passes no --length-* flags: nothing changes in the request.
+    expect(await firstRequestLimits(LENGTH_CHECK_OFF)).toEqual({ [idA]: undefined, [idB]: undefined });
+  });
+});
+
+// I-1 + amendments 8/9: a request that times out is split like a max_tokens truncation, never resent whole, and an
+// endpoint that has answered nothing in the job yet is probed -- the two halves of one timed-out group per round --
+// instead of being flooded with every group of the job.
+describe('runTranslateJob: timeouts and probe mode (I-1, amendment 9)', () => {
+  const TIMEOUT_MESSAGE = 'Custom: the request timed out after 90 seconds';
+  const timeout = (r: LlmRequest): LlmOutcome => ({ customId: r.customId, kind: 'error', message: TIMEOUT_MESSAGE, retryable: true });
+  const lines = (count: number) => Array.from({ length: count }, (_, i) => entry(`K${i}`, `Line ${i}`));
+  const toRu = (source: string) => source.replace('Line', 'Строка');
+  // An endpoint that answers a group of up to `answersUpTo` strings and times out on anything larger.
+  const bySize = (answersUpTo: number) => (r: LlmRequest): LlmOutcome =>
+    isJudgeRequest(r) ? ok(r.customId, { issues: [] }) : requestItems(r).length <= answersUpTo ? translateAll(r, toRu) : timeout(r);
+  const translateSizes = (llm: FakeLlmClient) => llm.calls.filter((c) => !isJudgeRequest(c)).map((c) => requestItems(c).length);
+
+  it('stops an always-timing-out job after 1 + ceil(log2 groupSize) waves, never sending round 0\'s unstarted requests', async () => {
+    const { store, cache } = setup(lines(120));
+    const llm = new FakeLlmClient(bySize(0), { pool: true });
+    await expect(runTranslateJob(store, llm, cache, options({ concurrency: 2 }))).rejects.toThrow(TIMEOUT_MESSAGE);
+    // Three groups of 40 at concurrency 2: round 0 starts two; the first timeout (nothing answered yet) holds the
+    // third, which is never sent. Then each wave sends only the two halves of the largest group that timed out:
+    // 40 -> 20 -> 10 -> 5 -> 3 -> 2 -> 1, i.e. 7 = 1 + ceil(log2 40) waves, 14 requests, and a single string that
+    // times out stops the job. (Before probe mode: 3 x (2 x 40 - 1) = 237 timeouts, then every string failed.)
+    expect(translateSizes(llm)).toEqual([40, 40, 20, 20, 10, 10, 5, 5, 3, 2, 2, 1, 1, 1]);
+    expect(llm.returned.filter((o) => o.kind === 'skipped')).toHaveLength(1);
+    // The job failed before writing any cell.
+    expect(store.getCell('ru', unitIdOf('HW', 'K0')).status).toBe('empty');
+  });
+
+  it('stops on a single string that times out before any answer, keeping the TM reuse already written', async () => {
+    const { store, cache } = setup([entry('A', 'BACK'), entry('B', 'BACK'), entry('C', 'PAUSED')]);
+    const idA = unitIdOf('HW', 'A');
+    store.putCell({ ...store.getCell('ru', idA), text: 'НАЗАД', status: 'approved', basedOnSourceRev: 1, basedOnSource: 'BACK' });
+    const llm = new FakeLlmClient(bySize(0), { pool: true });
+    await expect(runTranslateJob(store, llm, cache, options())).rejects.toThrow(TIMEOUT_MESSAGE);
+    expect(translateSizes(llm)).toEqual([1]);
+    expect(store.getCell('ru', unitIdOf('HW', 'B'))).toMatchObject({ text: 'НАЗАД', provenance: `tm:${idA}`, status: 'ai_draft' });
+    expect(store.getCell('ru', unitIdOf('HW', 'C')).status).toBe('empty');
+  });
+
+  it('finishes every string on an endpoint that answers 10 strings but not 40, never sending more than 10 after its first answer', async () => {
+    const { store, cache } = setup(lines(120));
+    const llm = new FakeLlmClient(bySize(10), { pool: true });
+    const report = await runTranslateJob(store, llm, cache, options({ concurrency: 2 }));
+    expect(report).toMatchObject({ requested: 120, written: 120, errors: 0 });
+    const sizes = translateSizes(llm);
+    // 40, 40 (the third group held) -> 20, 20 -> 10, 10 answered; then the held 40 + 40 and the waiting 20 go out in
+    // pieces of the size that was answered: 4 + 4 + 2 requests of 10.
+    expect(sizes).toEqual([40, 40, 20, 20, 10, 10, ...Array<number>(10).fill(10)]);
+    expect(Math.max(...sizes.slice(sizes.indexOf(10)))).toBe(10);
+    for (const i of [0, 57, 119]) expect(store.getCell('ru', unitIdOf('HW', `K${i}`)).text).toBe(`Строка ${i}`);
+  });
+
+  it('leaves a healthy endpoint\'s call pattern unchanged: nothing skipped, a timeout after an answer is only split', async () => {
+    // Four groups of 40 at concurrency 2. The second request times out and the third fails with a transient 500,
+    // both after the first answer landed; the fourth starts only once the timeout has landed, so it would be the one
+    // held if a timeout after an answer ever stalled the round.
+    const script = () => {
+      let translateCall = 0;
+      return (r: LlmRequest): LlmOutcome => {
+        if (isJudgeRequest(r)) return ok(r.customId, { issues: [] });
+        const call = translateCall++;
+        if (call === 1) return timeout(r);
+        if (call === 2) return { customId: r.customId, kind: 'error', message: 'Custom: 500 overloaded', retryable: true };
+        return translateAll(r, toRu);
+      };
+    };
+    const pooled = new FakeLlmClient(script(), { pool: true });
+    const pooledSetup = setup(lines(160));
+    const report = await runTranslateJob(pooledSetup.store, pooled, pooledSetup.cache, options({ concurrency: 2 }));
+    expect(report).toMatchObject({ written: 160, errors: 0 });
+    // Today's rules: all four groups go out in round 0 (an answer had landed before the timeout), then the timed-out
+    // group is split in two and the 500 is resent whole.
+    expect(translateSizes(pooled)).toEqual([40, 40, 40, 40, 20, 20, 40]);
+    expect(pooled.returned.some((o) => o.kind === 'skipped')).toBe(false);
+    // The same job on a client that ignores shouldContinue sends exactly the same requests.
+    const plain = new FakeLlmClient(script());
+    const plainSetup = setup(lines(160));
+    await runTranslateJob(plainSetup.store, plain, plainSetup.cache, options({ concurrency: 2 }));
+    expect(translateSizes(plain)).toEqual(translateSizes(pooled));
+  });
+
+  it('never counts a skipped request as an error, a cost or progress', async () => {
+    const { store, cache } = setup(lines(120));
+    const llm = new FakeLlmClient(bySize(10), { pool: true });
+    const events: (JobProgress & { calls: number })[] = [];
+    const report = await runTranslateJob(store, llm, cache, options({ concurrency: 2, onProgress: (p) => events.push({ ...p, calls: llm.calls.length }) }));
+    expect(llm.returned.filter((o) => o.kind === 'skipped').length).toBeGreaterThan(0);
+    expect(report).toMatchObject({ errors: 0, refused: 0, errorSamples: [] });
+    // Tokens come from answered requests only (ok() reports 10 in / 5 out each).
+    const answered = llm.returned.filter((o) => o.kind === 'ok').length;
+    expect(report.inputTokens).toBe(10 * answered);
+    expect(report.outputTokens).toBe(5 * answered);
+    // No string counts as done before the first answer (the 5th request); done never steps back and ends at 120.
+    const translate = events.filter((e) => e.phase === 'translate');
+    expect(translate.filter((e) => e.calls <= 4).every((e) => e.done === 0)).toBe(true);
+    for (let i = 1; i < translate.length; i++) expect(translate[i]!.done).toBeGreaterThanOrEqual(translate[i - 1]!.done);
+    expect(translate.at(-1)).toMatchObject({ done: 120, total: 120 });
+  });
+
+  // Amendment 8: Node's own fetch timeout (300 s) is the same timeout as LocHub's AbortSignal -- one fetch call, then
+  // the group is split -- proven through the real Custom adapter, not just a scripted outcome.
+  describe("Node's fetch timeout through the Custom adapter", () => {
+    const custom: CustomEndpointConfig = {
+      baseUrl: 'http://127.0.0.1:11434/v1',
+      keyHeader: 'bearer',
+      structuredOutput: 'json_schema',
+      priceIn: 0,
+      priceOut: 0,
+      maxParallel: 2,
+      requestTimeoutSeconds: 90,
+      settingsId: 'test-settings-id',
+    };
+    const chat = (content: string) =>
+      new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { status: 200 });
+
+    for (const [code, where] of [['UND_ERR_HEADERS_TIMEOUT', 'cause'], ['UND_ERR_BODY_TIMEOUT', 'error']] as const) {
+      it(`splits a group after a single fetch call when fetch fails with ${code} on the ${where}`, async () => {
+        const { store, cache } = setup([entry('A', 'PAUSED'), entry('B', 'BACK'), entry('C', '{Count} bales left'), entry('D', 'Line 4')]);
+        const sizes: number[] = [];
+        const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+          const body = JSON.parse(String(init!.body)) as { response_format: unknown; messages: { content: string }[] };
+          if (JSON.stringify(body.response_format).includes('"issues"')) return chat('{"issues":[]}');
+          const items = (JSON.parse(body.messages[1]!.content) as { items: { id: string; source: string }[] }).items;
+          sizes.push(items.length);
+          if (items.length > 2) {
+            const failure = new TypeError('fetch failed');
+            throw where === 'cause' ? Object.assign(failure, { cause: Object.assign(new Error('Headers Timeout Error'), { code }) }) : Object.assign(failure, { code });
+          }
+          const translated = items.map((i) => ({ id: i.id, translation: RU[i.source] ?? toRu(i.source), ambiguity: 'none', alts: [], question: '', terms_used: [] }));
+          return chat(JSON.stringify({ items: translated }));
+        }) as typeof fetch;
+        const llm = new OpenAiCompatibleLlmClient({ provider: 'custom', custom, fetchImpl, apiKey: '' });
+        const report = await runTranslateJob(store, llm, cache, options({ concurrency: 2 }));
+        // One call for the group of 4 (no fetch-level retry, no whole-group retry), then its two halves.
+        expect(sizes).toEqual([4, 2, 2]);
+        expect(report).toMatchObject({ written: 4, errors: 0 });
+      });
+    }
   });
 });

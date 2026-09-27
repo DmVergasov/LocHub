@@ -25,9 +25,12 @@ export interface TranslateExtras {
   neighbors?: readonly Neighbor[];
   // Answered inbox questions per unit id, until the next Push brings them back as DevNotes.
   answers?: ReadonlyMap<string, readonly string[]>;
+  // Length Check limit per unit id (Tell the Translator): the item carries it as maxLength.
+  maxLength?: ReadonlyMap<string, number>;
 }
 
-export const PROMPT_VERSION = 'translate-v1';
+// v2: items may carry maxLength (Length Check). Bumped so a draft's provenance tells which rules produced it.
+export const PROMPT_VERSION = 'translate-v2';
 
 export const TRANSLATE_RULES = [
   'You translate video game strings from English into the target culture for an Unreal Engine 5 game.',
@@ -53,6 +56,7 @@ export const TRANSLATE_RULES = [
   '- If an item has rejected_translation, a reviewer rejected that text: return a different translation.',
   '- neighbors are already translated strings of the same screen or asset: stay consistent with them.',
   '- If an item has previous_attempt and errors, return a corrected translation that fixes every listed error.',
+  '- If an item has maxLength, keep the translation within maxLength visible characters: placeholders and tags count 0, CJK characters count 2. Prefer a natural shorter wording over abbreviations.',
   'Return exactly one result per input id.',
 ].join('\n');
 
@@ -150,7 +154,7 @@ export function buildTranslateParams(
   model: string,
   extras: TranslateExtras = {},
 ): Anthropic.MessageCreateParamsNonStreaming {
-  const { repair, neighbors = [], answers } = extras;
+  const { repair, neighbors = [], answers, maxLength } = extras;
   const items = group.items.map(({ unit, cell }) => {
     const item: Record<string, unknown> = {
       id: unit.id,
@@ -174,6 +178,8 @@ export function buildTranslateParams(
       item.previous_attempt = fix.previous;
       item.errors = fix.errors;
     }
+    const limit = maxLength?.get(unit.id);
+    if (limit !== undefined) item.maxLength = limit;
     return item;
   });
   const body: Record<string, unknown> = { group: group.groupKey };

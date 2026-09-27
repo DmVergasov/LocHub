@@ -69,6 +69,68 @@ in the **API Key** field directly below (masked while typing). The change applie
 its own — right away, or, if a translation job is currently running, right after that job finishes; no editor
 restart needed.
 
+### The service does not start: Custom endpoint settings
+
+With **Custom (OpenAI-compatible)** selected, LocHub does not start the service when a setting can never work, and
+an editor notification says which one:
+
+> Set Base URL in Project Settings > Plugins > LocHub > AI; it must start with http:// or https://.
+
+> Remove the user name and password from Base URL in Project Settings > Plugins > LocHub > AI; put the key in API Key instead.
+
+> Set Custom Models > Translate Model in Project Settings > Plugins > LocHub > AI.
+
+LocHub names the setting in the LocHub tab (or in a notification, for a Tools > LocHub command). Fix it, then
+press **Reload** in the tab or run the command again — no editor restart needed.
+
+### Custom endpoint unreachable
+
+The AI pill reads **unreachable**, in red. Hover it for the reason:
+
+- "Cannot reach http://host:port (ECONNREFUSED)." — nothing listens there. Start the server (for Ollama,
+  `ollama serve`) and check the host and port in **Base URL**.
+- "… did not answer within 10 seconds." — the server is up but too busy or too slow to answer.
+- "… refused the request (HTTP 401): check API Key and Key Header." — the server wants a key, or a different
+  header: set **API Key**, and for Azure OpenAI set **Key Header** to **api-key**.
+
+LocHub checks the endpoint once, when the service starts. After fixing the server itself, use **Tools > LocHub >
+Restart Service** to check again.
+
+### Custom endpoint: model missing
+
+The AI pill reads **model missing**; hover it for the model IDs the endpoint does not list. Set **Custom Models** to
+IDs exactly as the server spells them (Ollama: `ollama list`; LM Studio: the loaded model's ID). A bare Ollama name
+such as `llama3.2` also matches `llama3.2:latest`. Azure OpenAI may not list deployment names at all — if a small job
+translates, the warning can be ignored.
+
+### Custom endpoint: no model list, then a job fails with HTTP 404
+
+The AI pill reads **no model list**, in the normal color (not a warning) — jobs may still work, so it is not shown
+as an error. If a job then fails with **HTTP 404**, the Base URL is probably missing its API path: for Ollama and
+LM Studio, **Base URL** must end in `/v1`.
+
+### Custom endpoint: Ollama silently truncates a large job
+
+Ollama's context window (`num_ctx`, 4096 by default on current builds) is often smaller than a full translate
+request covering many strings, and Ollama truncates the input silently instead of refusing it — see *Ollama* in
+[05_AI_Providers_and_Keys.md](05_AI_Providers_and_Keys.md) to raise it. Scoping the job to fewer strings at a time
+avoids the same problem.
+
+### Custom endpoint: invalid JSON
+
+A job on a Custom endpoint reports the error reason "The model returned no translation for this string." — the model
+did not answer in the JSON LocHub asked for. LocHub already accepts JSON wrapped in a code block or surrounded by
+other text; beyond that:
+
+1. Change **Structured Output**: JSON Schema, then JSON Object, then Prompt Only (some servers reject or ignore
+   `response_format`).
+2. Use a larger or instruction-tuned model: very small models often cannot follow a JSON schema.
+3. Lower **Max Parallel Requests** if the server runs out of memory under load. For a slow model, **Request Timeout
+   (seconds)** goes up to 300 (the default, and the most Node.js ever waits for an answer to start); beyond that,
+   LocHub splits a group that times out into smaller requests on its own, so a slow model still finishes. A job that
+   stops with "the request timed out after …" means even a single string did not finish in time: use a smaller or
+   faster model, or free the server's GPU.
+
 ### Claude Code was not found (Claude Subscription auth)
 
 When **Anthropic Auth** is **Claude Subscription**, **Estimate** and **Run** refuse to start if the `claude`
@@ -135,6 +197,11 @@ outdated string, the previous source and translation; reviewer notes and answere
 string; neighboring strings from the same group (for consistency); and, per culture, the project brief, the style
 guide and the glossary. Nothing else about the project is sent.
 
+**Can I translate with a local model, so nothing leaves my machine?**
+Yes. Set **AI Provider** to **Custom (OpenAI-compatible)** and point **Base URL** at a server on your machine, such
+as Ollama or LM Studio — see [05_AI_Providers_and_Keys.md](05_AI_Providers_and_Keys.md). Every request then goes to
+that server only, and no API key is needed.
+
 **What is sent to whom under Claude Subscription auth?**
 The same request content as under API Key auth (see "What text is sent to the AI provider?" above) — the
 difference is only how LocHub reaches Anthropic. LocHub never hands your Anthropic API key to the service in
@@ -165,4 +232,4 @@ In `Config/DefaultEditor.ini`, along with the other LocHub project settings — 
 same way those settings do, including through whatever version control the project uses. Anyone who can read
 the project's config can read the key.
 
-![Node.js required](images/11_node_missing.png)
+![Node.js required](images/03_node_missing.png)

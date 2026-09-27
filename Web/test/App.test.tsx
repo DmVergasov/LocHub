@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { LocHubApi } from '../src/api/client';
 import { App, editorStatus } from '../src/App';
 import type { AiStatus } from '../src/api/types';
@@ -402,5 +402,132 @@ describe('App', () => {
       restored = document.querySelector('.grid-scroll') as HTMLElement;
       expect(restored.scrollTop).toBe(700);
     });
+  });
+
+  describe('AI badge for a Custom endpoint', () => {
+    const customAi = (endpoint: AiStatus['endpoint']): AiStatus => ({
+      provider: 'custom',
+      auth: 'api',
+      translateModel: 'qwen3:8b',
+      judgeModel: 'qwen3:8b',
+      batch: false,
+      ready: true,
+      detail: 'No API key (not required for a custom endpoint)',
+      endpoint,
+    });
+
+    async function badgeFor(ai: AiStatus, text: string): Promise<HTMLElement> {
+      const fake = createFakeApi({ units: [makeUnit('Pause', 'PAUSED')], ai });
+      const api = new LocHubApi('', fake.fetch);
+      render(<App api={api} bridge={new EditorBridge(api, () => undefined)} healthMs={60_000} />);
+      return screen.findByText(text);
+    }
+
+    it('shows the endpoint host, both models and "endpoint OK", with no warning', async () => {
+      const badge = await badgeFor(customAi({ url: 'http://127.0.0.1:11434', status: 'ok' }), 'AI: Custom (127.0.0.1:11434) · qwen3:8b / qwen3:8b · endpoint OK');
+      expect(badge.className).toBe('ai-status');
+      expect(badge.title).toBe('');
+    });
+
+    it('shows "checking endpoint…" while the startup probe runs', async () => {
+      const badge = await badgeFor(customAi({ url: 'http://127.0.0.1:11434', status: 'checking' }), 'AI: Custom (127.0.0.1:11434) · qwen3:8b / qwen3:8b · checking endpoint…');
+      expect(badge.className).toBe('ai-status');
+    });
+
+    it('warns about a missing model, with the probe detail as the title', async () => {
+      const badge = await badgeFor(
+        customAi({ url: 'http://127.0.0.1:11434', status: 'model_missing', detail: 'http://127.0.0.1:11434 does not list qwen3:8b.', missingModels: ['qwen3:8b'] }),
+        'AI: Custom (127.0.0.1:11434) · qwen3:8b / qwen3:8b · model missing',
+      );
+      expect(badge.className).toBe('ai-status warning');
+      expect(badge.title).toBe('http://127.0.0.1:11434 does not list qwen3:8b.');
+    });
+
+    it('styles only an unreachable endpoint as an error', async () => {
+      const badge = await badgeFor(
+        customAi({ url: 'https://example.test', status: 'unreachable', detail: 'Cannot reach https://example.test (ECONNREFUSED).' }),
+        'AI: Custom (example.test) · qwen3:8b / qwen3:8b · unreachable',
+      );
+      expect(badge.className).toBe('ai-status endpoint-error');
+      expect(badge.title).toBe('Cannot reach https://example.test (ECONNREFUSED).');
+    });
+
+    it('shows a server without a model list as neutral "no model list"', async () => {
+      const badge = await badgeFor(
+        customAi({ url: 'http://127.0.0.1:8080', status: 'unknown', detail: 'http://127.0.0.1:8080 has no model list LocHub can read (GET /models answered HTTP 404).' }),
+        'AI: Custom (127.0.0.1:8080) · qwen3:8b / qwen3:8b · no model list',
+      );
+      expect(badge.className).toBe('ai-status');
+    });
+  });
+
+  // I-1: a Length Check settings change restarts the service with a different lengthArgs string; that restart
+  // resets jobsFinished to 0, so nothing else reloads the grid, and the card's counter (GridRow.lengthLimit,
+  // filled by the last GET /api/cells) would otherwise keep the OLD limit forever without a manual Refresh.
+  describe('Length Check settings change while a card is open (health.ai.lengthArgs)', () => {
+    const COUNTER_TITLE = 'Visible characters / Length Check limit';
+    const lengthAi = (lengthArgs: string): AiStatus => ({
+      provider: 'anthropic',
+      auth: 'api',
+      translateModel: 'claude-opus-5-5',
+      judgeModel: 'claude-sonnet-5',
+      batch: true,
+      ready: true,
+      detail: '',
+      lengthArgs,
+    });
+
+    afterEach(() => {
+      window.location.hash = '#/grid';
+    });
+
+    it('follows the limit to the card counter when lengthArgs changes, then hides the counter once Length Check turns off — all without Refresh', async () => {
+      const unit = makeUnit('Bales', '{Count} bales left');
+      const fake = createFakeApi({
+        // 'Осталось {Count} тюков' is 15 visible characters (the argument counts 0).
+        units: [unit],
+        cells: { ru: { [unit.id]: makeCell(unit.id, 'ru', { text: 'Осталось {Count} тюков', status: 'ai_draft', band: 'Y' }) } },
+        ai: lengthAi('--length-check warning --length-scope ui --length-ratio 1.30 --length-extra 4'),
+      });
+      fake.state.lengthLimits = { [unit.id]: 20 };
+      const api = new LocHubApi('', fake.fetch);
+      window.location.hash = `#/card/ru/${unit.id}`;
+      render(<App api={api} bridge={new EditorBridge(api, () => undefined)} healthMs={20} />);
+
+      await waitFor(() => expect(screen.getByTitle(COUNTER_TITLE).textContent).toBe('15/20'));
+
+      // Length Check settings changed (a new ratio/limit); the editor restarted the service with them, so
+      // lengthArgs — and the limit GET /api/cells now sends for this string — both changed.
+      fake.state.lengthLimits = { [unit.id]: 10 };
+      fake.state.ai = lengthAi('--length-check warning --length-scope ui --length-ratio 1.30 --length-extra 8');
+
+      await waitFor(() => expect(screen.getByTitle(COUNTER_TITLE).textContent).toBe('15/10'), { timeout: 5000 });
+      expect(screen.getByTitle(COUNTER_TITLE).className).toBe('length-counter over');
+
+      // Length Check turned off entirely: the limit is now null, so the counter disappears — "never enabled"
+      // means no highlight at all, not merely no "over" class.
+      fake.state.lengthLimits = { [unit.id]: null };
+      fake.state.ai = lengthAi('--length-check off');
+
+      await waitFor(() => expect(screen.queryByTitle(COUNTER_TITLE)).toBeNull(), { timeout: 5000 });
+    }, 10000);
+
+    it('does not reload on the very first poll, even when lengthArgs already has a value', async () => {
+      const unit = makeUnit('Bales', '{Count} bales left');
+      const fake = createFakeApi({
+        units: [unit],
+        cells: { ru: { [unit.id]: makeCell(unit.id, 'ru', { text: 'Осталось {Count} тюков', status: 'ai_draft', band: 'Y' }) } },
+        ai: lengthAi('--length-check warning --length-scope ui --length-ratio 1.30 --length-extra 4'),
+      });
+      fake.state.lengthLimits = { [unit.id]: 20 };
+      const api = new LocHubApi('', fake.fetch);
+      window.location.hash = `#/card/ru/${unit.id}`;
+      render(<App api={api} bridge={new EditorBridge(api, () => undefined)} healthMs={20} />);
+      await screen.findByTitle(COUNTER_TITLE);
+
+      const cellCallsBefore = fake.calls.filter((c) => c.startsWith('GET /api/cells')).length;
+      await waitFor(() => expect(fake.calls.filter((c) => c === 'GET /api/health').length).toBeGreaterThanOrEqual(3), { timeout: 5000 });
+      expect(fake.calls.filter((c) => c.startsWith('GET /api/cells')).length).toBe(cellCallsBefore);
+    }, 10000);
   });
 });

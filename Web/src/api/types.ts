@@ -1,6 +1,6 @@
 // Wire types. Everything the service keeps in its contract module is imported from there, so the web app and the
 // service cannot drift; shapes that live next to Node-only service code are mirrored below.
-import type { Cell, CoverageFinding, InboxItem, Unit } from '../../../Service/src/contract';
+import type { Cell, CoverageFinding, EndpointHealth, InboxItem, Unit } from '../../../Service/src/contract';
 
 export type {
   Band,
@@ -9,6 +9,8 @@ export type {
   CellEvent,
   CellStatus,
   CoverageFinding,
+  EndpointHealth,
+  EndpointStatus,
   GlossaryTerm,
   InboxItem,
   InboxStatus,
@@ -20,6 +22,10 @@ export interface CellRow {
   unit: Unit;
   cell: Cell;
   outdated: boolean;
+  // Length Check limit of this unit in this culture (Service/src/lengthCheck.ts lengthLimitFor): the most visible
+  // characters a translation may have, or null when the string has none. The service always sends it; optional only so
+  // an older service's rows (and test fixtures) type-check. Absent means no limit.
+  lengthLimit?: number | null;
 }
 
 export interface CellsPage {
@@ -53,6 +59,9 @@ export interface JobEstimate {
   // service's own retries could not clear. Absent (never `false`) for a wholly real estimate. Absent from an
   // older service that predates the field, in which case it means the same as `false`.
   approximate?: boolean;
+  // Custom endpoints only: both Project Settings prices are 0, so usd is 0 and Max USD cannot limit spending.
+  // Absent (never `false`) otherwise, and from an older service.
+  pricesUnset?: boolean;
 }
 
 // Mirror of JobReport in Service/src/job.ts. errorSamples is up to 3 redacted messages explaining what went
@@ -137,7 +146,7 @@ export interface InboxRow {
   unit: InboxUnit | null;
 }
 
-export type AiProvider = 'anthropic' | 'openai' | 'xai' | 'deepseek' | 'gemini';
+export type AiProvider = 'anthropic' | 'openai' | 'xai' | 'deepseek' | 'gemini' | 'custom';
 
 // Mirror of the health block server.ts builds from the active AI provider config: which provider and models
 // translate jobs run on, whether Batch mode is available for it, and whether it is actually usable right now
@@ -150,6 +159,13 @@ export interface AiStatus {
   batch: boolean;
   ready: boolean;
   detail: string;
+  // Custom endpoints only: the service's startup probe of GET {base}/models; url is scheme://host[:port] only.
+  endpoint?: EndpointHealth;
+  // The Length Check flags the service runs with (mirrors AiHealth.lengthArgs, Service/src/providers.ts): changes
+  // whenever Length Check settings change (the editor restarts the service with the new settings). App watches
+  // this to reload the grid — and so the cell panel's limit — without a manual Refresh (I-1). Absent from an
+  // older service that predates the field; App treats that the same as "no reload" (see App.tsx).
+  lengthArgs?: string;
 }
 
 export interface Health {
@@ -181,3 +197,6 @@ export interface LiveEntry {
   source: string;
   translation: string;
 }
+
+// Translation exchange (POST /api/import).
+export type { ImportEntry, ImportIssue, ImportOutcome, ImportRequest, ImportResult, ImportRow } from '../../../Service/src/contract';
