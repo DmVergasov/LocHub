@@ -23,7 +23,6 @@ Need a commercial license before the Fab listing is live? Email
 
 ![Grid overview](Docs/images/01_grid_overview.png)
 ![Review queue](Docs/images/06_review_queue.png)
-![Local model on a Custom endpoint](Docs/images/09_custom_endpoint_status.png)
 ![Translated in context](Docs/images/15_context.png)
 ![Export for translators](Docs/images/12_export_dialog.png)
 ![Glossary](Docs/images/17_glossary.png)
