@@ -19,10 +19,12 @@ If you got LocHub as source (for example, copied into `Plugins/LocHub` of your p
 Fab, the steps are the same: enable it in **Edit > Plugins** and restart. The engine builds the plugin as
 part of your project's normal build.
 
-## 3. First launch: the Node.js check
+## 3. The Node.js check
 
-The first time the editor finishes loading with LocHub enabled, it checks in the background whether a
-supported Node.js is available. LocHub looks for it in this order, stopping at the first one that works:
+LocHub checks whether a supported Node.js is available when you launch it: open the **LocHub** tab
+(**Tools > LocHub > Open LocHub**), or run **Push**, **Push (Dry Run)**, **Pull** or **Restart Service**.
+Nothing about Node.js happens when the editor itself starts. LocHub looks for it in this order, stopping at
+the first one that works:
 
 1. The per-user setting **Editor Preferences > Plugins > LocHub > Node.js Executable**, if you set one — when
    set, only that path is used.
@@ -34,11 +36,13 @@ supported Node.js is available. LocHub looks for it in this order, stopping at t
 
 If none of these finds Node.js 22.11 or newer, a **"LocHub: Node.js required"** window opens, listing where
 it looked, with a **Download Node.js** link and an **Open Settings** button that takes you straight to the
-**Node.js Executable** setting.
+**Node.js Executable** setting; the tab or the notification that triggered the check shows the error too.
+The window opens once per failed launch attempt — it does not stack a second copy while one is already open.
 
 ![The Node.js required window](images/03_node_missing_dialog.png)
 
-> **Tip:** after installing Node.js, restart the editor — the check only runs once, at startup.
+> **Tip:** after installing Node.js, just launch LocHub again (for example press **Reload** in the tab). If
+> it is still not found, restart the editor so it picks up the updated PATH.
 
 ## 4. What "installed" looks like
 

@@ -36,6 +36,15 @@ void SLocHubNodeMissingWindow::Open(const FLocHubNodeCheck& InCheck)
 {
 	using namespace LocHubNodeMissingWindowPrivate;
 
+	// A failed tool launch can be retried (or another tool launched) before the user closes the first window;
+	// keep to one window instead of stacking a second copy of the same message.
+	static TWeakPtr<SWindow> OpenWindow;
+	if (const TSharedPtr<SWindow> Existing = OpenWindow.Pin())
+	{
+		Existing->BringToFront();
+		return;
+	}
+
 	const TSharedRef<SWindow> Window = SNew(SWindow)
 		.Title(LOCTEXT("Title", "LocHub: Node.js required"))
 		.SizingRule(ESizingRule::Autosized)
@@ -43,6 +52,7 @@ void SLocHubNodeMissingWindow::Open(const FLocHubNodeCheck& InCheck)
 		.SupportsMaximize(false);
 
 	const TWeakPtr<SWindow> WeakWindow = Window;
+	OpenWindow = Window;
 
 	Window->SetContent(
 		SNew(SVerticalBox)

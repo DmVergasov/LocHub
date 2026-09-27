@@ -67,9 +67,6 @@ private:
 	static void ReportResult(const FLocHubSyncResult& InResult);
 	/** The editor notification first, then InOnFinished. */
 	static FOnSyncFinished ReportThen(FOnSyncFinished InOnFinished);
-	/** Runs once the engine (and Slate, outside commandlets/unattended runs) is up: warns on anything but a
-	 *  supported Node.js on PATH and, with Slate available, opens SLocHubNodeMissingWindow with a download link. */
-	void OnEngineLoopInitComplete();
 	/** ULocHubSettings::OnSettingChanged(): re-syncs the running service's config and probes it (never starting one)
 	 *  so an AI provider change reaches an owned service, or an orphan not yet adopted, without waiting for the
 	 *  next Push/Pull/Open. */
@@ -80,8 +77,6 @@ private:
 	TUniquePtr<FLocHubProvider> Provider;
 	/** Outgoing SSE stream that runs web-app commands relayed by the service; null in commandlets and unattended runs. */
 	TSharedPtr<FLocHubBridgeClient> BridgeClient;
-	/** Set only outside commandlets/unattended/automation runs; removed in ShutdownModule. */
-	FDelegateHandle EngineLoopInitCompleteHandle;
 	/** ULocHubSettings::OnSettingChanged(); removed in ShutdownModule. */
 	FDelegateHandle SettingsChangedHandle;
 };

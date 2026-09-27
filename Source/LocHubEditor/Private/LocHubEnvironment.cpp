@@ -20,9 +20,9 @@ namespace LocHubEnvironmentPrivate
 {
 	constexpr int32 MinNodeMajor = 22;
 	constexpr int32 MinNodeMinor = 11;
-	// Shared by the startup hook (thread pool) and the service start (game thread): neither may block on a node
-	// that never exits, so every bounded process this file launches polls up to this deadline and terminates it
-	// instead of waiting forever.
+	// Every bounded process this file launches (CheckNode's own "node --version" and the Mac/Linux login-shell
+	// lookup, both reached from StartNode on the game thread when a tool launch needs them) must not block on a
+	// node that never exits, so each polls up to this deadline and terminates it instead of waiting forever.
 	constexpr double NodeVersionTimeoutSeconds = 5.0;
 	constexpr float NodeVersionPollIntervalSeconds = 0.05f;
 
@@ -133,9 +133,8 @@ namespace LocHubEnvironmentPrivate
 		FProcHandle Handle;
 		{
 			// Same lock FLocHubServiceProcess::StartNode holds around its own CreateProc while LOCHUB_API_KEY is set
-			// on the editor's environment: this call can run on a thread-pool task (the startup Node.js check)
-			// concurrently with that window, so without this it could inherit the key (Windows) or race the
-			// SetEnvironmentVar calls around it (Mac/Linux).
+			// on the editor's environment (LocHubProcessSpawnLock.h): without it, this call racing that window
+			// could inherit the key (Windows) or race the SetEnvironmentVar calls around it (Mac/Linux).
 			FScopeLock SpawnLock(&LocHubProcessSpawnLock::Get());
 			Handle = FPlatformProcess::CreateProc(*SpawnCommand.Exe, *SpawnCommand.Args, false, true, true, &ProcessId, 0, nullptr, PipeWrite, StdinRead);
 		}
@@ -286,10 +285,10 @@ namespace LocHubEnvironmentPrivate
 	FString FindNodeViaLoginShell(const ELocHubHostOS InHostOS)
 	{
 		static TOptional<FString> CachedResult;
-		// CheckNode runs both off the startup pool task (LocHubEditorModule::OnEngineLoopInitComplete) and on the
-		// game thread (LocHubServiceProcess starting a node), so two first callers could race on CachedResult.
-		// The lock is held across the shell launch itself, not just the check-and-store, so a second caller waits
-		// for the first answer instead of starting its own shell process.
+		// CheckNode's only caller is StartNode, reached on the game thread whenever a tool launch needs the
+		// service, but nothing here assumes that stays true, so CachedResult is still guarded against two first
+		// callers racing: the lock is held across the shell launch itself, not just the check-and-store, so a
+		// second caller waits for the first answer instead of starting its own shell process.
 		static FCriticalSection CacheLock;
 		FScopeLock Lock(&CacheLock);
 		if (CachedResult.IsSet())
@@ -486,8 +485,8 @@ TArray<FString> LocHubEnvironment::FilterCandidateVersionDirs(TArray<FString> In
 		if (TryParseVersionDirName(Dir, Parts) && Parts.Num() >= 2 && !IsNodeVersionSupported(Parts[0], Parts[1]))
 		{
 			// The directory name already says this is older than we support: skip it here rather than pay for a
-			// bounded "node --version" launch (on the game thread at startup, or a pool thread later) that could
-			// only confirm what the name already said.
+			// bounded "node --version" launch (on the game thread, reached from StartNode when a tool launch needs
+			// it) that could only confirm what the name already said.
 			continue;
 		}
 		Result.AddUnique(MoveTemp(Dir));

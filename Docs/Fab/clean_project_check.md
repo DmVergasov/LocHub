@@ -21,10 +21,12 @@ but not mandatory if 5.6 and 5.8 both pass, since 5.7 sits between them.
 - [ ] **Enable the plugin.** Edit > Plugins > search "LocHub" (category Localization). It should be listed
       but **unchecked** (`EnabledByDefault` is off). Check it, and let the editor restart when it asks.
 - [ ] **Node.js required window.** If the test machine has no Node.js 22.11+ reachable (no PATH entry, no
-      per-user Node.js Executable setting, none of the usual install locations), the "LocHub: Node.js
-      required" window should appear on editor start, naming where it looked, with a working "Download
-      Node.js" link/button and an "OK" to dismiss. If a suitable Node.js is present and discoverable, the
-      window should **not** appear.
+      per-user Node.js Executable setting, none of the usual install locations), nothing about Node.js should
+      happen when the editor itself starts. The "LocHub: Node.js required" window should instead appear the
+      first time you launch LocHub — open **Tools > LocHub > Open LocHub**, or run **Push**, **Push (Dry
+      Run)**, **Pull** or **Restart Service** — naming where it looked, with a working "Download Node.js"
+      link/button and an "OK" to dismiss. If a suitable Node.js is present and discoverable, the window
+      should **not** appear.
   - [ ] Optionally verify the override path: set **Editor Preferences > Plugins > LocHub > Node.js
         Executable** to a valid Node.js binary and confirm the window no longer appears (or, if Node.js is
         genuinely absent, that setting it there is what makes LocHub start working).

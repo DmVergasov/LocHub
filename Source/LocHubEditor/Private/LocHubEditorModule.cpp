@@ -2,7 +2,6 @@
 
 #include "LocHubEditorModule.h"
 
-#include "Async/Async.h"
 #include "Bridge/LocHubBridgeClient.h"
 #include "Bridge/LocHubBridgeCommands.h"
 #include "Features/IModularFeatures.h"
@@ -20,10 +19,8 @@
 #include "LocHubTargetPaths.h"
 #include "LocHubTargetSetup.h"
 #include "LocHubTypes.h"
-#include "LocHubUserSettings.h"
 #include "LocalizationTargetTypes.h"
 #include "Misc/App.h"
-#include "Misc/CoreDelegates.h"
 #include "Misc/MessageDialog.h"
 #include "Modules/ModuleManager.h"
 #include "Tab/SLocHubNodeMissingWindow.h"
@@ -82,11 +79,24 @@ void FLocHubEditorModule::StartupModule()
 		BridgeClient->Start(LocHubBridge::GetServiceBaseUrl());
 	}
 
-	// Same exclusions as the bridge above, plus automation: a test run must not pop a window over the check it is
-	// itself exercising (LocHub.Environment.NodeCheck.Classify runs the pure functions directly, not this hook).
-	if (!IsRunningCommandlet() && !FApp::IsUnattended() && !GIsAutomationTesting)
+	// Same exclusions as the bridge above; a commandlet or unattended run must never wire this up at all.
+	// GIsAutomationTesting is checked inside the lambda itself, not here, so an automation run in an attended
+	// editor session -- one that reaches this module's own ServiceProcess through Push/Pull/Open LocHub -- still
+	// never pops a window over a Node.js problem it hits along the way.
+	if (!IsRunningCommandlet() && !FApp::IsUnattended())
 	{
-		EngineLoopInitCompleteHandle = FCoreDelegates::OnFEngineLoopInitComplete.AddRaw(this, &FLocHubEditorModule::OnEngineLoopInitComplete);
+		// Not "this": StartNode may call this well after the module (and the editor) has started shutting down,
+		// and nothing here needs module state.
+		ServiceProcess->OnNodeProblemFn = [](const FLocHubNodeCheck& InCheck)
+		{
+			const FString Problem = LocHubEnvironment::DescribeNodeProblem(InCheck);
+			UE_LOG(LogLocHub, Warning, TEXT("%s"), *Problem);
+			if (GIsAutomationTesting || !FSlateApplication::IsInitialized() || IsEngineExitRequested())
+			{
+				return;
+			}
+			SLocHubNodeMissingWindow::Open(InCheck);
+		};
 	}
 
 	// So an AI provider (or any other) change in Project Settings reaches an already-running service without
@@ -96,12 +106,6 @@ void FLocHubEditorModule::StartupModule()
 
 void FLocHubEditorModule::ShutdownModule()
 {
-	if (EngineLoopInitCompleteHandle.IsValid())
-	{
-		FCoreDelegates::OnFEngineLoopInitComplete.Remove(EngineLoopInitCompleteHandle);
-		EngineLoopInitCompleteHandle.Reset();
-	}
-
 	if (SettingsChangedHandle.IsValid() && UObjectInitialized())
 	{
 		ULocHubSettings* Settings = GetMutableDefault<ULocHubSettings>();
@@ -391,33 +395,6 @@ FLocHubEditorModule::FOnSyncFinished FLocHubEditorModule::ReportThen(FOnSyncFini
 			OnFinished(InResult);
 		}
 	};
-}
-
-void FLocHubEditorModule::OnEngineLoopInitComplete()
-{
-	// GetDefault<ULocHubUserSettings>() touches UObject/CDO state, which belongs to the game thread; read it here
-	// and hand CheckNode the value directly instead of letting it read the setting from the pool thread below.
-	// LocHubEnvironment::CheckNode() bounds a stuck node.exe to its own poll deadline, but it still runs off the
-	// game thread here so even that bound cannot be felt as a startup stall. The lambdas below must not capture
-	// the module (no "this") so nothing here depends on it surviving until the thread pool gets to the work.
-	const FString ConfiguredNodePath = GetDefault<ULocHubUserSettings>()->NodeExecutable.FilePath;
-	Async(EAsyncExecution::ThreadPool, [ConfiguredNodePath]()
-	{
-		const FLocHubNodeCheck NodeCheck = LocHubEnvironment::CheckNode(ConfiguredNodePath);
-		AsyncTask(ENamedThreads::GameThread, [NodeCheck]()
-		{
-			if (NodeCheck.Status == ELocHubNodeStatus::Ok)
-			{
-				return;
-			}
-			const FString Problem = LocHubEnvironment::DescribeNodeProblem(NodeCheck);
-			UE_LOG(LogLocHub, Warning, TEXT("%s"), *Problem);
-			if (FSlateApplication::IsInitialized() && !IsEngineExitRequested())
-			{
-				SLocHubNodeMissingWindow::Open(NodeCheck);
-			}
-		});
-	});
 }
 
 void FLocHubEditorModule::OnSettingsChanged(UObject* InObject, FPropertyChangedEvent& InEvent)

@@ -7,6 +7,7 @@
 #include "HAL/PlatformProcess.h"
 
 struct FLocHubHealth;
+struct FLocHubNodeCheck;
 
 /**
  * Keeps "node <plugin>/Resources/LocHubService/lochub_service.mjs serve" available on the configured port. A service still owned by a
@@ -155,6 +156,12 @@ public:
 	 *  FLocHubEditorModule::StartupModule, to FLocHubSyncRunner::IsBusy(); unset (the default) in tests that do not
 	 *  exercise this gate. */
 	TFunction<bool()> IsServiceInUseFn;
+
+	/** Called (when set), from StartNode, right where it classifies a non-Ok Node.js check, before StartNode
+	 *  returns false -- the existing OutError/waiter/notification path is unaffected either way. Wired once, by
+	 *  FLocHubEditorModule::StartupModule, to open SLocHubNodeMissingWindow for the tool launch that just failed;
+	 *  unset (the default) in tests that do not exercise this seam. */
+	TFunction<void(const FLocHubNodeCheck& InCheck)> OnNodeProblemFn;
 
 private:
 	void ProbeHealth();

@@ -8,9 +8,9 @@
 /**
  * One process-wide lock shared by every FPlatformProcess::CreateProc call this plugin makes that either changes
  * the editor's own environment for the duration of the spawn (FLocHubServiceProcess::StartNode, which sets
- * LOCHUB_API_KEY around it) or can run concurrently with that window on a thread-pool task
- * (LocHubEnvironment::RunBoundedProcess -- the startup Node.js check and the Mac/Linux login-shell node lookup
- * both launch it off the game thread). Two problems without this lock:
+ * LOCHUB_API_KEY around it) or could in principle run concurrently with that window
+ * (LocHubEnvironment::RunBoundedProcess -- CheckNode's own "node --version" launch and the Mac/Linux login-shell
+ * node lookup). Two problems without this lock:
  *  - Windows: CreateProcess snapshots the caller's environment at the moment it is called, so a RunBoundedProcess
  *    launch from a pool thread while StartNode's window is open would silently inherit LOCHUB_API_KEY.
  *  - Mac/Linux: FPlatformMisc::SetEnvironmentVar (setenv/unsetenv) racing a concurrent posix_spawn on another

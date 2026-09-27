@@ -517,11 +517,15 @@ bool FLocHubServiceProcess::StartNode(FString& OutError)
 	// removed here, never killed on its say-so alone.
 	RemoveStalePidFile();
 
-	// The startup check (LocHubEditorModule) and this start use the same classification, so they cannot diverge.
+	// Every tool launch reaches this same classification -- there is no separate check at editor startup any more.
 	const FLocHubNodeCheck NodeCheck = LocHubEnvironment::CheckNode();
 	if (NodeCheck.Status != ELocHubNodeStatus::Ok)
 	{
 		OutError = LocHubEnvironment::DescribeNodeProblem(NodeCheck);
+		if (OnNodeProblemFn)
+		{
+			OnNodeProblemFn(NodeCheck);
+		}
 		return false;
 	}
 	const FString& Node = NodeCheck.Path;
@@ -542,11 +546,11 @@ bool FLocHubServiceProcess::StartNode(FString& OutError)
 	const FString Arguments = BuildServeArguments(Config);
 	uint32 NewProcessId = 0;
 	{
-		// LocHubProcessSpawnLock held for the whole section: without it, a concurrent CreateProc this plugin makes
-		// elsewhere off the game thread (LocHubEnvironment::RunBoundedProcess, e.g. the startup Node.js check on a
-		// thread pool task) could inherit LOCHUB_API_KEY on Windows (CreateProcess snapshots the environment at the
-		// moment it is called) or race this SetEnvironmentVar/CreateProc/SetEnvironmentVar sequence on Mac/Linux
-		// (setenv/unsetenv concurrent with posix_spawn is a data race in the C library, not just a logical one).
+		// LocHubProcessSpawnLock held for the whole section: without it, a concurrent CreateProc elsewhere in the
+		// process (LocHubEnvironment::RunBoundedProcess, or any other holder listed in LocHubProcessSpawnLock.h)
+		// could inherit LOCHUB_API_KEY on Windows (CreateProcess snapshots the environment at the moment it is
+		// called) or race this SetEnvironmentVar/CreateProc/SetEnvironmentVar sequence on Mac/Linux (setenv/unsetenv
+		// concurrent with posix_spawn is a data race in the C library, not just a logical one).
 		FScopeLock SpawnLock(&LocHubProcessSpawnLock::Get());
 		// Scoped tightly around the spawn: CreateProc snapshots the editor's environment for the child at this
 		// point, and the destructor below restores the editor's own value (or clears it) before anything else runs,

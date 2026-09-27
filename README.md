@@ -133,8 +133,9 @@ and
 - **From source:** clone or copy this repository into your project's `Plugins/LocHub`, then enable it the
   same way. The engine builds the C++ module as part of your project's normal build.
 
-Either way, restart the editor when prompted; the first launch checks for a supported Node.js in the
-background.
+Either way, restart the editor when prompted. Node.js is checked separately, the first time you launch
+LocHub — open **Tools > LocHub > Open LocHub**, or run **Push**, **Push (Dry Run)**, **Pull** or
+**Restart Service** — not when the editor itself starts.
 
 ## Quick start
 

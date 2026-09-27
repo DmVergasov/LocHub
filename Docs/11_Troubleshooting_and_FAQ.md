@@ -4,9 +4,12 @@
 
 ### Node.js was not found (or is too old)
 
-LocHub needs a local Node.js 22.11 or newer to run its service; the editor checks this at startup and, if
-anything is wrong, opens a **"LocHub: Node.js required"** window naming the problem, with a **Download Node.js**
-link and an **Open Settings** button.
+LocHub needs a local Node.js 22.11 or newer to run its service; it checks this when you launch LocHub — open
+the LocHub tab (**Tools > LocHub > Open LocHub**), or run **Push**, **Push (Dry Run)**, **Pull** or
+**Restart Service** — and, if anything is wrong, opens a **"LocHub: Node.js required"** window naming the
+problem, with a **Download Node.js** link and an **Open Settings** button; the tab or the notification shows
+the error too. The window opens once per failed launch attempt — it does not stack a second copy while one
+is already open.
 
 LocHub looks for Node.js in this order, stopping at the first one that works:
 
@@ -20,7 +23,8 @@ LocHub looks for Node.js in this order, stopping at the first one that works:
 5. macOS/Linux only: the user's login shell, in case Node.js is only set up there.
 
 If none of these finds a working Node.js, the window lists exactly where it looked. Install Node.js 22.11+, or
-point the **Node.js Executable** setting at an existing install, then restart the editor.
+point the **Node.js Executable** setting at an existing install, then just launch LocHub again (for example
+press **Reload** in the tab); if it is still not found, restart the editor so it picks up the updated PATH.
 
 ### Port already in use
 

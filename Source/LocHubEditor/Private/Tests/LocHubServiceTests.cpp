@@ -12,6 +12,7 @@
 #include "LocHubServiceProcess.h"
 #include "LocHubSettings.h"
 #include "LocHubSyncLock.h"
+#include "LocHubUserSettings.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -1415,6 +1416,78 @@ bool FLocHubServiceStartNodeKeyHandoverTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("LocHubProcessSpawnLock was held for the whole set-env/spawn/restore section"), *bLockWasHeld);
 		TestEqual(TEXT("The variable is back to its previous value afterwards"),
 			FPlatformMisc::GetEnvironmentVariable(FLocHubServiceProcess::ApiKeyEnvVarName), PreviousKeyEnvValue);
+		LocHubTests::DeleteTempDir(TempDir);
+		return true;
+	}));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FLocHubServiceNodeProblemOpensHandlerTest,
+	"LocHub.Service.NodeProblemOpensHandler",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FLocHubServiceNodeProblemOpensHandlerTest::RunTest(const FString& Parameters)
+{
+	using namespace LocHubServiceTestsPrivate;
+
+	// Proves the seam StartNode now calls instead of the removed startup check: when CheckNode finds no usable
+	// Node.js, OnNodeProblemFn must fire with that same check, EnsureRunning's own caller must still see the
+	// unchanged DescribeNodeProblem error text, and StartNode must never reach CreateProcessFn -- the check fails
+	// the launch before the "node serve" spawn it guards is ever attempted.
+	AddExpectedMessage(TEXT("libcurl"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
+
+	// Restored inside the latent command below, not via ON_SCOPE_EXIT here: EnsureRunning's health probe is an
+	// async HTTP request, so RunTest() returns (running any ON_SCOPE_EXIT immediately) well before StartNode -- on
+	// a later tick -- ever reads the setting.
+	ULocHubUserSettings* UserSettings = GetMutableDefault<ULocHubUserSettings>();
+	const FString PreviousNodeExecutable = UserSettings->NodeExecutable.FilePath;
+	// CheckNode stops at the configured setting (bFromSetting) without touching PATH or any version manager, so a
+	// path that simply does not exist fails fast -- no real Node.js install on this machine matters either way.
+	UserSettings->NodeExecutable.FilePath = FPaths::ProjectIntermediateDir() / TEXT("LocHubTests/NoSuchNode.exe");
+
+	const FString TempDir = LocHubTests::MakeTempDir();
+	FLocHubServiceProcess::FConfig Config = MakeTestConfig(TempDir, LocHubTests::DeadServicePort, true);
+	// Written so a missing service script can never be the reason CreateProcessFn below is unreached: only the
+	// Node.js check gates it here.
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(Config.ServiceScript), true);
+	TestTrue(TEXT("Service script fixture written"), LocHubTests::WriteTextFile(Config.ServiceScript, FString()));
+
+	const TSharedRef<FLocHubServiceProcess> Service = MakeShared<FLocHubServiceProcess>(Config);
+
+	const TSharedRef<int32> ProblemCallCount = MakeShared<int32>(0);
+	const TSharedRef<FLocHubNodeCheck> CapturedCheck = MakeShared<FLocHubNodeCheck>();
+	Service->OnNodeProblemFn = [ProblemCallCount, CapturedCheck](const FLocHubNodeCheck& InCheck)
+	{
+		++(*ProblemCallCount);
+		*CapturedCheck = InCheck;
+	};
+
+	const TSharedRef<bool> bCreateProcessCalled = MakeShared<bool>(false);
+	Service->CreateProcessFn = [bCreateProcessCalled](const FString&, const FString&, const FString&, void*, uint32&) -> FProcHandle
+	{
+		*bCreateProcessCalled = true;
+		return FProcHandle();
+	};
+
+	const TSharedRef<LocHubTests::FAsyncOutcome> Outcome = MakeShared<LocHubTests::FAsyncOutcome>();
+	Service->EnsureRunning(RecordOutcome(Outcome));
+
+	const double Deadline = FPlatformTime::Seconds() + 15.0;
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([this, Service, Outcome, ProblemCallCount, CapturedCheck, bCreateProcessCalled, Deadline, TempDir, UserSettings, PreviousNodeExecutable]() -> bool
+	{
+		if (!Outcome->bDone && FPlatformTime::Seconds() < Deadline)
+		{
+			return false;
+		}
+		TestTrue(TEXT("Answered without hanging"), Outcome->bDone);
+		TestEqual(TEXT("OnNodeProblemFn fired exactly once"), *ProblemCallCount, 1);
+		TestNotEqual(TEXT("The captured check is not Ok"), CapturedCheck->Status, ELocHubNodeStatus::Ok);
+		TestTrue(TEXT("The check came from the configured setting"), CapturedCheck->bFromSetting);
+		TestFalse(TEXT("EnsureRunning reports failure"), Outcome->bOk);
+		TestEqual(TEXT("The error is DescribeNodeProblem of the same check"), Outcome->Error, LocHubEnvironment::DescribeNodeProblem(*CapturedCheck));
+		TestFalse(TEXT("CreateProcessFn (the node serve spawn) was never reached"), *bCreateProcessCalled);
+		UserSettings->NodeExecutable.FilePath = PreviousNodeExecutable;
 		LocHubTests::DeleteTempDir(TempDir);
 		return true;
 	}));
