@@ -53,10 +53,10 @@ from this table.
 
 ## 5. Draft and FabURL
 
-- [ ] Create the draft listing on Fab.
-- [ ] Record the resulting Fab listing URL here once the draft exists:
+- [x] Create the draft listing on Fab.
+- [x] Record the resulting Fab listing URL here once the draft exists:
 
-  `FabURL: <fill in after creating the draft>`
+  `FabURL: https://www.fab.com/listings/aaf6a7ae-e02e-4975-91b4-129e2456e491`
 
 ## 6. Listing text and media
 

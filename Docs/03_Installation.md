@@ -2,7 +2,7 @@
 
 ## 1. Install from Fab
 
-1. Buy or add LocHub from Fab, then install it into your **Engine** (not a specific project) from the Epic
+1. Buy or add LocHub from [Fab](https://www.fab.com/listings/aaf6a7ae-e02e-4975-91b4-129e2456e491), then install it into your **Engine** (not a specific project) from the Epic
    Games Launcher / Fab library, for the Unreal Engine version you use.
 2. Open your project. LocHub ships with **Enable by Default off**, so open **Edit > Plugins**, find
    **LocHub** under the Localization category, and enable it.

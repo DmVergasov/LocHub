@@ -14,7 +14,8 @@ When reporting a problem, please include:
 ## License
 
 LocHub distributed through **Fab** is covered by the **Fab Standard License**, which includes commercial use in your
-projects — see the license terms on its Fab product page for what that permits.
+projects — see the license terms on its [Fab product page](https://www.fab.com/listings/aaf6a7ae-e02e-4975-91b4-129e2456e491)
+for what that permits.
 
 ## Third-party notices
 

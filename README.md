@@ -6,14 +6,12 @@ review it in one place, and pull it back into the localization archives.
 LocHub is source-available under the **Business Source License 1.1**: free to read, modify and use, and
 free to run in production for personal projects, education, academic research, game jams, or games given
 away free of charge with no monetization of any kind. Any other production use needs a license purchased on
-Fab. Each released version converts to the **Apache License 2.0** four years after its publication.
+[Fab](https://www.fab.com/listings/aaf6a7ae-e02e-4975-91b4-129e2456e491). Each released version converts to
+the **Apache License 2.0** four years after its publication.
 
 See [`LICENSE`](LICENSE) for the full text.
 
-**Get LocHub on Fab:** [coming soon](https://www.fab.com/) <!-- FAB_URL: replace with the listing URL at release -->
-
-Need a commercial license before the Fab listing is live? Email
-[rim2812@gmail.com](mailto:rim2812@gmail.com).
+**Get LocHub on Fab:** [fab.com/listings/aaf6a7ae-e02e-4975-91b4-129e2456e491](https://www.fab.com/listings/aaf6a7ae-e02e-4975-91b4-129e2456e491)
 
 ![LocHub — AI-assisted localization for Unreal Engine](Docs/images/cover.png)
 
@@ -145,7 +143,7 @@ and
 
 ## Installation
 
-- **From Fab:** install LocHub into your Engine from the Epic Games Launcher / Fab library, then enable it
+- **From [Fab](https://www.fab.com/listings/aaf6a7ae-e02e-4975-91b4-129e2456e491):** install LocHub into your Engine from the Epic Games Launcher / Fab library, then enable it
   per project in **Edit > Plugins** (Localization category) — it ships with Enable by Default off.
 - **From source:** clone or copy this repository into your project's `Plugins/LocHub`, then enable it the
   same way. The engine builds the C++ module as part of your project's normal build.
@@ -218,7 +216,8 @@ every engine version passed to `--engines`.
 See the summary at the top of this README, and [`LICENSE`](LICENSE) for the full text.
 
 If you bought LocHub through **Fab**, your use is also covered by the **Fab Standard License**, which
-includes commercial use in your own projects — see the license terms on its Fab product page.
+includes commercial use in your own projects — see the license terms on its
+[Fab product page](https://www.fab.com/listings/aaf6a7ae-e02e-4975-91b4-129e2456e491).
 
 ## Support
 
