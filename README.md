@@ -13,7 +13,10 @@ commercial license on [Fab](https://www.fab.com/listings/aaf6a7ae-e02e-4975-91b4
 ![Unreal Engine 5.6--5.8](https://img.shields.io/badge/Unreal%20Engine-5.6--5.8-313131)
 ![Platform: Windows (tested)](https://img.shields.io/badge/Platform-Windows%20%28tested%29-informational)
 
-![LocHub — AI-assisted localization for Unreal Engine](Docs/images/cover.png)
+![The review queue: the AI dropped {ItemName}, LocHub flags it, the reviewer types it back, A approves](Docs/images/review_queue.gif)
+
+*The AI dropped `{ItemName}` from a German translation. LocHub flags it, the reviewer types it back, the
+warning clears, <kbd>A</kbd> approves, and the next risky string comes up.*
 
 LocHub is source-available under the **Business Source License 1.1**: free to read, modify and use, and
 free to run in production for personal projects, education, academic research, game jams, or games given
@@ -23,6 +26,7 @@ the **Apache License 2.0** four years after its publication.
 
 See [`LICENSE`](LICENSE) for the full text.
 
+![LocHub — AI-assisted localization for Unreal Engine](Docs/images/cover.png)
 ![Grid overview](Docs/images/01_grid_overview.png)
 ![Review queue](Docs/images/06_review_queue.png)
 ![Translated in context](Docs/images/15_context.png)

@@ -6,3 +6,4 @@ Resources/LocHubService/** linguist-generated
 Resources/LocHubWeb/** linguist-generated
 Source/ThirdParty/LocHubNodeDeps/** linguist-generated
 Source/ThirdParty/LocHubWebDeps/** linguist-generated
+*.gif binary
