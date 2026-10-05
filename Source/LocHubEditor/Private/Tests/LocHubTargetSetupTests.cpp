@@ -191,9 +191,11 @@ bool FLocHubSetupNativeCultureTest::RunTest(const FString& Parameters)
 	FLocalizationTargetSettings English;
 	English.SupportedCulturesStatistics.Add(FCultureStatistics(TEXT("en")));
 	English.NativeCultureIndex = 0;
-	LocHubTargetSetup::ConfigureTarget(English, false, SourceDirs, ContentDirs, TEXT("zh-Hans"), { TEXT("ja") }, FakeIsKnownCulture);
+	const TArray<FString> KeptChanges = LocHubTargetSetup::ConfigureTarget(English, false, SourceDirs, ContentDirs, TEXT("zh-Hans"), { TEXT("ja") }, FakeIsKnownCulture);
 	TestEqual(TEXT("Existing native culture is kept"), English.SupportedCulturesStatistics[English.NativeCultureIndex].CultureName, FString(TEXT("en")));
 	TestFalse(TEXT("The setting's culture is not added"), HasCulture(English, TEXT("zh-Hans")));
+	// Set Up says so, or a person who changed the setting after the first Set Up believes it was applied.
+	TestTrue(TEXT("Keeping the native culture is reported"), KeptChanges.Contains(TEXT("Native culture en kept: Setup Native Culture (zh-Hans) applies only to a target without one; change an existing target's native culture in the Localization Dashboard.")));
 
 	// A setting the engine does not recognize falls back to en, and Set Up says so.
 	FLocalizationTargetSettings Typo;

@@ -323,6 +323,10 @@ bool FLocHubRunnerPullWritesAcksAndNotesTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("Pull succeeded"), Outcome->Result.bSuccess);
 		TestEqual(TEXT("One written"), Outcome->Result.Written, 1);
 		TestEqual(TEXT("One rejected"), Outcome->Result.Rejected, 1);
+		TestTrue(TEXT("Stale translations are counted against the source text, whatever its language"), Outcome->Result.Details.ContainsByPredicate([](const FString& InLine)
+		{
+			return InLine.Contains(TEXT("skipped because the source text changed"));
+		}));
 
 		const TArray<FLocHubFakeService::FRecordedRequest> Acks = Fake->GetRequests(TEXT("/api/export/ack"));
 		if (TestEqual(TEXT("One ack"), Acks.Num(), 1))

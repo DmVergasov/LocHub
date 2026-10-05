@@ -58,6 +58,18 @@ namespace LocHubTargetSetupPrivate
 			InOutSettings.NativeCultureIndex = NativeIndex;
 			OutChanges.Add(FString::Printf(TEXT("Native culture: %s."), *Native));
 		}
+		else
+		{
+			// Said every time the two differ: a person who changed the setting after the first Set Up would otherwise
+			// read "already set up" and believe LocHub now translates from the new culture.
+			const FString& Existing = InOutSettings.SupportedCulturesStatistics[InOutSettings.NativeCultureIndex].CultureName;
+			const FString Requested = InNativeCulture.TrimStartAndEnd();
+			FString Canonical;
+			if (!Requested.IsEmpty() && InIsKnownCulture(Requested, Canonical) && !Canonical.Equals(Existing, ESearchCase::IgnoreCase))
+			{
+				OutChanges.Add(FString::Printf(TEXT("Native culture %s kept: Setup Native Culture (%s) applies only to a target without one; change an existing target's native culture in the Localization Dashboard."), *Existing, *Canonical));
+			}
+		}
 
 		// Free-text entries the engine cannot resolve to a real culture (a typo like "dee" or "zz") are not
 		// silently turned into a "culture" of the target -- they are skipped and named together, once, so the
