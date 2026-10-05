@@ -1648,7 +1648,7 @@ function ExchangeActions({ api: api2, bridge, culture, cultures, nativeCulture, 
           /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "all", children: `All strings (${totalCount})` })
         ] })
       ] }),
-      sourceUnknown && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "muted", children: "Push once so LocHub knows the source culture: XLIFF needs it." }),
+      sourceUnknown && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "muted", children: "Push, then Refresh, so LocHub knows the source culture: XLIFF needs it." }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "actions", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", className: "primary", onClick: () => void runExport(), disabled: busy || sourceUnknown, children: "Export" }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", onClick: close, disabled: busy, children: "Cancel" })

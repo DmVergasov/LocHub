@@ -288,7 +288,7 @@ export function ExchangeActions({ api, bridge, culture, cultures, nativeCulture,
               <option value="all">{`All strings (${totalCount})`}</option>
             </select>
           </label>
-          {sourceUnknown && <p className="muted">Push once so LocHub knows the source culture: XLIFF needs it.</p>}
+          {sourceUnknown && <p className="muted">Push, then Refresh, so LocHub knows the source culture: XLIFF needs it.</p>}
           <div className="actions">
             <button type="button" className="primary" onClick={() => void runExport()} disabled={busy || sourceUnknown}>
               Export

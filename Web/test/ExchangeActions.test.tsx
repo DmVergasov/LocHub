@@ -156,7 +156,7 @@ describe('ExchangeActions', () => {
       await user.selectOptions(screen.getByLabelText('Export format'), 'xliff');
       const dialog = screen.getByRole('dialog', { name: 'Export translations' });
       expect((within(dialog).getByRole('button', { name: 'Export' }) as HTMLButtonElement).disabled).toBe(true);
-      expect(within(dialog).getByText('Push once so LocHub knows the source culture: XLIFF needs it.')).toBeTruthy();
+      expect(within(dialog).getByText('Push, then Refresh, so LocHub knows the source culture: XLIFF needs it.')).toBeTruthy();
       expect(savetextfile).not.toHaveBeenCalled();
     });
 
@@ -167,7 +167,7 @@ describe('ExchangeActions', () => {
 
       await user.click(screen.getByRole('button', { name: 'Export…' }));
       const dialog = screen.getByRole('dialog', { name: 'Export translations' });
-      expect(within(dialog).queryByText('Push once so LocHub knows the source culture: XLIFF needs it.')).toBeNull();
+      expect(within(dialog).queryByText('Push, then Refresh, so LocHub knows the source culture: XLIFF needs it.')).toBeNull();
       await user.click(within(dialog).getByRole('button', { name: 'Export' }));
       expect(await screen.findByText('Saved to D:/x/lochub-ru.csv')).toBeTruthy();
     });

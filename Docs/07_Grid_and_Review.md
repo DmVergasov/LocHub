@@ -110,6 +110,9 @@ Excel or Google Sheets — and bring their work back through the same format che
 
 The file is saved as `lochub-<culture>.csv` or `lochub-<culture>.xlf`, in UTF-8.
 
+XLIFF names the source language, which is the target's native culture as reported by Push: until LocHub has had
+a Push (for example right after updating from LocHub 1.1), XLIFF export is unavailable. Push, then click Refresh.
+
 **CSV columns**, in this order: `namespace`, `key`, `source`, `translation`, `status`, `context` (where the string
 comes from), `notes` (developer notes), `max_length` (the UI length limit, when Length Check gives the string one),
 `lochub_id` and `lochub_revision`. Keep `lochub_id` and `lochub_revision` in the file you get back: they identify the
