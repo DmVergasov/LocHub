@@ -1,7 +1,19 @@
 # LocHub
 
-AI-assisted localization for Unreal Engine: translate your project's text with your own AI provider,
-review it in one place, and pull it back into the localization archives.
+AI-assisted localization for Unreal Engine 5.6–5.8: translate your project's text with your own AI — Claude,
+GPT, Gemini, DeepSeek, Grok or a local model through Ollama or LM Studio — let built-in checks and a second AI
+catch the problems, review everything in one grid inside the editor, and pull it back as plain Unreal
+localization data.
+
+**Free for non-commercial use** — personal projects, education, game jams, free games ·
+commercial license on [Fab](https://www.fab.com/listings/aaf6a7ae-e02e-4975-91b4-129e2456e491) ·
+[Quick start](#quick-start) · [Documentation](https://app.notion.com/p/LocHub-3e7fed51161881b6be04fb732972cb38)
+
+[![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-blue)](LICENSE)
+![Unreal Engine 5.6--5.8](https://img.shields.io/badge/Unreal%20Engine-5.6--5.8-313131)
+![Platform: Windows (tested)](https://img.shields.io/badge/Platform-Windows%20%28tested%29-informational)
+
+![LocHub — AI-assisted localization for Unreal Engine](Docs/images/cover.png)
 
 LocHub is source-available under the **Business Source License 1.1**: free to read, modify and use, and
 free to run in production for personal projects, education, academic research, game jams, or games given
@@ -10,14 +22,6 @@ away free of charge with no monetization of any kind. Any other production use n
 the **Apache License 2.0** four years after its publication.
 
 See [`LICENSE`](LICENSE) for the full text.
-
-**Get LocHub on Fab:** [fab.com/listings/aaf6a7ae-e02e-4975-91b4-129e2456e491](https://www.fab.com/listings/aaf6a7ae-e02e-4975-91b4-129e2456e491)
-
-![LocHub — AI-assisted localization for Unreal Engine](Docs/images/cover.png)
-
-[![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-blue)](LICENSE)
-![Unreal Engine 5.6--5.8](https://img.shields.io/badge/Unreal%20Engine-5.6--5.8-313131)
-![Platform: Windows (tested)](https://img.shields.io/badge/Platform-Windows%20%28tested%29-informational)
 
 ![Grid overview](Docs/images/01_grid_overview.png)
 ![Review queue](Docs/images/06_review_queue.png)
@@ -165,6 +169,8 @@ LocHub — open **Tools > LocHub > Open LocHub**, or run **Push**, **Push (Dry R
    compile `.locres`.
 
 See [`Docs/04_Quick_Start.md`](Docs/04_Quick_Start.md) for the full walkthrough.
+
+If LocHub helps you, a ⭐ on GitHub helps other Unreal developers find it.
 
 ## Repository layout
 
