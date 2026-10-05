@@ -7,6 +7,9 @@ import { parsePattern } from './ueText.js';
 
 export interface CultureContext {
   culture: Culture;
+  // The localization target's native culture: the language of every source text (job.ts cultureContext fills it from
+  // the store's last Push); absent or '' when no Push has reported it.
+  sourceCulture?: Culture;
   brief: string;
   style: string;
   glossary: GlossaryTerm[];
@@ -29,11 +32,27 @@ export interface TranslateExtras {
   maxLength?: ReadonlyMap<string, number>;
 }
 
-// v2: items may carry maxLength (Length Check). Bumped so a draft's provenance tells which rules produced it.
-export const PROMPT_VERSION = 'translate-v2';
+// v2: items may carry maxLength (Length Check). v3: the source culture is named in the culture block instead of the
+// rules assuming English. Bumped so a draft's provenance tells which rules produced it.
+export const PROMPT_VERSION = 'translate-v3';
+
+const LANGUAGE_NAMES = new Intl.DisplayNames(['en'], { type: 'language', fallback: 'none' });
+
+// "Simplified Chinese (zh-Hans)" for a culture ICU knows; "the source language (<code>)" for one it does not, or
+// for a malformed code (Intl.DisplayNames throws on those), and "the source language" when there is no code at all.
+export function describeCulture(code: string): string {
+  if (code === '') return 'the source language';
+  let name: string | undefined;
+  try {
+    name = LANGUAGE_NAMES.of(code);
+  } catch {
+    name = undefined;
+  }
+  return name ? `${name} (${code})` : `the source language (${code})`;
+}
 
 export const TRANSLATE_RULES = [
-  'You translate video game strings from English into the target culture for an Unreal Engine 5 game.',
+  'You translate video game strings from the source culture into the target culture for an Unreal Engine 5 game.',
   'Hard rules:',
   '- Keep every {Argument} exactly as written: same names, same case. Never translate argument names.',
   '- Keep format modifiers {Arg}|plural(...), {Arg}|ordinal(...), {Arg}|gender(...), {Arg}|hpp(...).',
@@ -61,7 +80,7 @@ export const TRANSLATE_RULES = [
 ].join('\n');
 
 export const JUDGE_RULES = [
-  'You review translations of video game strings from English into the target culture.',
+  'You review translations of video game strings from the source culture into the target culture.',
   'Report only real problems: wrong meaning, wrong or inconsistent terminology against the glossary,',
   'ungrammatical or unnatural target text, wrong tone or register against the style guide, broken locale conventions.',
   'severity: critical = misleads the player or is offensive; major = wrong meaning or clearly wrong grammar;',
@@ -125,6 +144,7 @@ export function buildCultureBlock(ctx: CultureContext): string {
           .map((t) => (t.dnt ? `- ${t.term} => DNT (keep verbatim)` : `- ${t.term} => ${t.translation}${t.note ? ` (${t.note})` : ''}`))
           .join('\n');
   return [
+    `Source culture: ${describeCulture(ctx.sourceCulture ?? '')}`,
     `Target culture: ${ctx.culture}`,
     `Plural categories (cardinal): ${(ctx.plurals?.cardinal ?? pluralCategories(ctx.culture, 'cardinal')).join(', ')}`,
     `Plural categories (ordinal): ${(ctx.plurals?.ordinal ?? pluralCategories(ctx.culture, 'ordinal')).join(', ')}`,

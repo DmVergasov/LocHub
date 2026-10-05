@@ -65,12 +65,13 @@ Provider: immediately, or right after a running job finishes.
 
 | Setting | Type | Default | What it does |
 |---|---|---|---|
+| **Setup Native Culture** | Culture code | `en` | The native culture **Tools > LocHub > Set Up Localization Target** gives the `Game` target when it has none yet — the language your source text is written in, which LocHub translates from (for example `zh-Hans` for a game written in Chinese). A target that already has a native culture keeps it, and the Set Up summary says so when it differs from this setting: change an existing target's native culture in the Localization Dashboard. A name the engine does not recognize falls back to `en`, and the Set Up summary says so. |
 | **Setup Foreign Cultures** | Array of culture codes | `de`, `fr`, `es`, `ja` | The foreign cultures **Tools > LocHub > Set Up Localization Target** adds to the `Game` target. Every run adds whichever listed cultures the target does not already have (a union; existing cultures are never removed) — so a culture you removed in the Localization Dashboard comes back on the next Set Up if it is still listed here. To drop a culture for good, remove it from this setting too. Unknown culture names (not one the engine recognizes) are skipped and named in the Set Up summary. |
 
 ## Length Check
 
 Flags translations that are likely too long for your UI — German or Russian text often runs 30–40% longer than
-English — and tells the AI translator each string's limit up front, so it aims for a translation that fits.
+English, and English often runs far longer than Chinese — and tells the AI translator each string's limit up front, so it aims for a translation that fits.
 
 ![Project Settings > Plugins > LocHub > Length Check](images/11_length_check_settings.png)
 
@@ -78,13 +79,13 @@ English — and tells the AI translator each string's limit up front, so it aims
 |---|---|---|---|
 | **Enable Length Check** | Bool | On | Turns the check on. The other Length Check settings are greyed out while it is off. |
 | **Length Check Scope** | UI strings / All strings | UI strings | **UI strings** checks only strings sent as widget text — the ones matching **Ui Source Patterns** (see [Push](#push)). **All strings** checks every string. |
-| **Max Length Ratio** | Float (1.0–5.0) | `1.3` | How many times as long as the English source a translation may be. Two decimal places are used. |
+| **Max Length Ratio** | Float (1.0–5.0) | `1.3` | How many times as long as the source a translation may be. Two decimal places are used. For a Chinese, Japanese or Korean source translated into a Latin-script language, start around `1.8` (or set it per culture in **Culture Ratio Overrides**): CJK characters already count 2, but a translation still usually needs more room than that. |
 | **Extra Characters** | Integer (0–100) | `4` | Characters allowed on top of the ratio, so a very short string ("OK", "Back") is not flagged for a few extra letters. |
 | **Culture Ratio Overrides** | Map of culture → ratio | Empty | A different ratio for one culture (`pt-BR`) or a whole language (`de`, used for every German culture). An exact culture wins over its language; anything not listed uses **Max Length Ratio**. Ratios outside 1.0–5.0 are clamped; a key that is not a culture or language code is skipped and named in the Output Log. |
 | **Tell the Translator** | Bool | On | Sends each string's limit with the translation request, so the AI aims for a translation that fits. |
 | **Length Severity** | Warning / Must Confirm | Warning | **Warning**: a translation over its limit is flagged (band Y) and can be approved as usual. **Must Confirm**: approving or saving it needs **Approve anyway** / **Save anyway**, and an AI draft over the limit is written **Needs fix** — which the next job picks up and translates again. |
 
-**How the limit is computed.** Limit = the English source's visible length × the ratio for the culture, rounded up,
+**How the limit is computed.** Limit = the source's visible length × the ratio for the culture, rounded up,
 plus **Extra Characters**. Visible length counts what the player sees: format arguments such as `{0}` or
 `{PlayerName}` and rich-text tags count 0; a `|plural(...)`, `|ordinal(...)`, `|gender(...)` or `|hpp(...)` argument
 counts as its longest form; Chinese, Japanese and Korean characters, fullwidth forms, and emoji in the blocks

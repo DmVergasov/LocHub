@@ -216,7 +216,7 @@ export async function main(): Promise<void> {
   // The engine's plural forms from the last Push, persisted so they survive the service restart the editor
   // runs on every AI/brief setting change: Saved/LocHub, like the response cache below, not Localization/LocHub
   // (source-controlled) -- they describe the running engine, not project data.
-  const store = LocHubStore.load(join(config.projectDir, 'Localization', 'LocHub'), join(config.projectDir, 'Saved', 'LocHub', 'plural_forms.json'));
+  const store = LocHubStore.load(join(config.projectDir, 'Localization', 'LocHub'), join(config.projectDir, 'Saved', 'LocHub', 'plural_forms.json'), join(config.projectDir, 'Saved', 'LocHub', 'native_culture.json'));
   // Subscription auth needs no provider key at all, so this only runs for `--auth api`.
   const apiKey = config.ai.auth === 'api' ? resolveApiKey(process.env) : undefined;
   const llm = createLlmClient(config.ai, resolve(config.projectDir), apiKey);

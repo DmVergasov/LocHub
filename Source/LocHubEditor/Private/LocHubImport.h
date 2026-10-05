@@ -16,7 +16,7 @@ struct FLocHubImportResult
 	TArray<FLocHubAckWritten> Written;
 	/** Failed the engine checks; the archive keeps what it had. */
 	TArray<FLocHubAckRejected> Rejected;
-	/** The manifest has a different English text; the service re-translates after the next Push. */
+	/** The manifest has a different source text; the service re-translates after the next Push. */
 	int32 SkippedStale = 0;
 	/** The key is not in the manifest any more. */
 	int32 SkippedUnknown = 0;

@@ -48,7 +48,16 @@ describe('runTranslateJob', () => {
     const report = await runTranslateJob(store, new FakeLlmClient((r) => translateAll(r)), cache, options());
     expect(report).toMatchObject({ requested: 3, written: 3, needsFix: 0, bands: { R: 0, Y: 0, G: 3 } });
     const cell = LocHubStore.load(store.dataDir).getCell('ru', unitIdOf('HW', 'A'));
-    expect(cell).toMatchObject({ text: 'ПАУЗА', status: 'ai_draft', band: 'G', provenance: 'ai:claude-opus-5-5+translate-v2', revision: 1 });
+    expect(cell).toMatchObject({ text: 'ПАУЗА', status: 'ai_draft', band: 'G', provenance: 'ai:claude-opus-5-5+translate-v3', revision: 1 });
+  });
+
+  it('tells the model the source culture the store knows from the last Push', async () => {
+    const { store, cache } = setup();
+    store.setNativeCulture('zh-Hans');
+    const llm = new FakeLlmClient((r) => translateAll(r));
+    await runTranslateJob(store, llm, cache, options());
+    const translate = llm.calls.find((c) => !isJudgeRequest(c));
+    expect(JSON.stringify(translate)).toContain('Source culture: Simplified Chinese (zh-Hans)');
   });
 
   // The brief is service config (JobOptions.brief), not store data: cultureContext takes it from opts, not

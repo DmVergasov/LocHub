@@ -77,7 +77,7 @@ the first one — a reasoning model's chain of thought can itself contain a draf
 - A unit is `(namespace, key)` of a UE text. The service derives `unitId = sha256(JSON.stringify([namespace, key]))`,
   first 16 hex characters. The plugin never computes ids: it sends `namespace`/`key` and gets ids back in responses.
 - Metadata key `LocHub.Kind`: `"ui"` for text shown in widgets, `"text"` otherwise (affects triage).
-- `cell.basedOnSource` is the English text the translation was made from; `outdated` = `cell.basedOnSourceRev < unit.sourceRev`.
+- `cell.basedOnSource` is the source text (in the target's native culture) the translation was made from; `outdated` = `cell.basedOnSourceRev < unit.sourceRev`.
 
 ## Request hygiene
 
@@ -440,7 +440,7 @@ Plugin: push, export, reconcile, export/ack, inbox (answered), inbox/applied, br
 | Method | Path | Body / query | Response |
 |---|---|---|---|
 | GET | `/api/health` | — | `{ ok, units, editorConnected, pid, projectDir, stale, jobRunning, jobsFinished, ai }` — see below |
-| GET | `/api/meta` | — | `{ nativeCulture, cultures[] }`: target cultures of the last Push plus cultures that have cells, only in spellings the culture guard accepts |
+| GET | `/api/meta` | — | `{ nativeCulture, cultures[] }`: `nativeCulture` is the native culture the last real Push reported (it survives a restart, see Push protocol; `''` until any Push has reported one); `cultures` are the target cultures of the last Push plus cultures that have cells, only in spellings the culture guard accepts |
 | POST | `/api/push` | `Snapshot`; query `dryRun=1` counts without applying | `PushReport` |
 | POST | `/api/reconcile` | `{ archives: { <culture>: ArchiveEntry[] } }` — exactly the `archives` object of a Push snapshot, same validation rules as Push (entry shape, culture regex, case-duplicate archive keys, `checkCulture` per culture incl. in-flight job cultures) | `200 { humanEdits }`; `400 { error }` on a malformed body |
 | GET | `/api/coverage` | — | `{ pushedAt, findings: CoverageFinding[] }` from the last real Push |
@@ -574,7 +574,7 @@ event recorded for them; the store's multi-file save is not atomic across that w
 - `archives` carries the current archive translation of every unit, so edits made outside LocHub are detected. It
   carries foreign (non-native) cultures only; the plugin must leave any other archive entry — one for a unit
   LocHub does not track, or for the native culture — untouched.
-- Each archive entry's `source` is the English text the translation was made for. Push ignores an entry whose
+- Each archive entry's `source` is the source text (native culture) the translation was made for. Push ignores an entry whose
   `source` differs from the unit's current source (UE keeps a stale foreign archive entry on purpose; that is not
   a decision about the current text) and an entry whose translation equals a text LocHub itself produced earlier
   for this cell (a stale export — the ack was lost, or the archive file was reverted by a source control sync,
@@ -592,6 +592,10 @@ event recorded for them; the store's multi-file save is not atomic across that w
   Node's `Intl.PluralRules`. A malformed
   value (not an object, a bad culture key, keys differing only in case, a missing or empty list, a name outside the
   six categories) is `400 { error }`.
+- `nativeCulture` is the target's native culture: the language of every `source` text, which the translate and judge
+  prompts name as the source culture. A real Push stores it in `<ProjectDir>/Saved/LocHub/native_culture.json`
+  (`{ "nativeCulture": "<code>" }`), reloaded at service start, so it survives the restart the editor runs on every AI
+  setting change; a dry run never changes it. A Push without it (a plugin older than 1.2.0) means `en`.
 - Use `?dryRun=1` first when the numbers need a human look (for example, a large tombstone count).
 
 ## Bridge commands (args)
@@ -599,7 +603,7 @@ event recorded for them; the store's multi-file save is not atomic across that w
 - `OpenOrigin { unitId, namespace, key, origin }` — open the asset / source location.
 - `SetPreviewCulture { culture }` — `FTextLocalizationManager::EnableGameLocalizationPreview`.
 - `ApplyLive { culture, entries: [{namespace, key, source, translation}] }` — previews `culture`, then
-  `UpdateFromLocalizationResource`. `source` is the current English text: the engine ignores a live entry whose
+  `UpdateFromLocalizationResource`. `source` is the current source text (native culture): the engine ignores a live entry whose
   source hash differs (`TextLocalizationManager.cpp:1060`).
 - Inside the editor tab the web app calls the same commands directly on `window.ue.lochub`
   (`openorigin(origin)`, `setpreviewculture(culture)`, `applylive(culture, entriesJson)`) and never relays them.

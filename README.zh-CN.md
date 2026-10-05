@@ -10,8 +10,9 @@ Grok，或通过 Ollama / LM Studio 运行的本地模型（如 Qwen）——由
 [Fab](https://www.fab.com/listings/aaf6a7ae-e02e-4975-91b4-129e2456e491) 购买许可 ·
 [文档（英文）](https://app.notion.com/p/LocHub-3e7fed51161881b6be04fb732972cb38)
 
-> **注意：** 目前 LocHub 的源语言为英语——它把英文原文翻译成你项目中的各个目标语言（包括简体中文、繁体中文、日语、韩语等）。
-> 以中文为源语言的项目暂不支持。
+> **源语言就是本地化目标的 Native Culture（1.2.0 起）。** 用中文编写的项目可以直接翻译成英语、日语、韩语等：在
+> **Project Settings > Plugins > LocHub > Localization Target > Setup Native Culture** 中填写 `zh-Hans`（已有目标请在
+> Localization Dashboard 中修改其 Native Culture），并把 `en` 加入 **Setup Foreign Cultures**。英文项目照常使用，默认值为 `en`。
 
 ![审校队列：AI 漏掉了 {ItemName}，LocHub 标记出来，审校者补上后按 A 通过](Docs/images/review_queue.gif)
 

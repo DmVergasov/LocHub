@@ -6,7 +6,7 @@ import type { SnapshotEntry } from '../src/contract.js';
 import { buildGroups, neighborsOf, selectWork } from '../src/grouping.js';
 import { unitIdOf } from '../src/ids.js';
 import { cultureContext } from '../src/job.js';
-import { buildCultureBlock, buildJudgeParams, buildTranslateParams, TRANSLATE_RULES, type CultureContext } from '../src/prompt.js';
+import { buildCultureBlock, buildJudgeParams, buildTranslateParams, describeCulture, JUDGE_RULES, TRANSLATE_RULES, type CultureContext } from '../src/prompt.js';
 import { applySnapshot } from '../src/push.js';
 import { LocHubStore } from '../src/store.js';
 
@@ -234,5 +234,41 @@ describe('TRANSLATE_RULES: Length Check', () => {
     expect(TRANSLATE_RULES).toContain(
       '- If an item has maxLength, keep the translation within maxLength visible characters: placeholders and tags count 0, CJK characters count 2. Prefer a natural shorter wording over abbreviations.',
     );
+  });
+});
+
+describe('source culture', () => {
+  it('describes a culture by its English name and its code', () => {
+    expect(describeCulture('zh-Hans')).toBe('Simplified Chinese (zh-Hans)');
+    expect(describeCulture('en')).toBe('English (en)');
+  });
+
+  it('falls back to "the source language" for an unknown, invalid or empty code, without throwing', () => {
+    expect(describeCulture('xx-Fake')).toBe('the source language (xx-Fake)');
+    expect(describeCulture('%%')).toBe('the source language (%%)');
+    expect(describeCulture('')).toBe('the source language');
+  });
+
+  it('starts the culture block with the source culture', () => {
+    expect(buildCultureBlock({ ...ctx, culture: 'en', sourceCulture: 'zh-Hans' }).split('\n').slice(0, 2)).toEqual([
+      'Source culture: Simplified Chinese (zh-Hans)',
+      'Target culture: en',
+    ]);
+    expect(buildCultureBlock(ctx).split('\n')[0]).toBe('Source culture: the source language');
+  });
+
+  it('names the source culture in translate and judge requests, and the fixed rules no longer say English', () => {
+    const [group] = buildGroups(selectWork(seeded(), 'ru'), 40).filter((g) => g.groupKey === 'Hud');
+    const zh = { ...ctx, sourceCulture: 'zh-Hans' };
+    expect(JSON.stringify(buildTranslateParams(zh, group!, 'claude-opus-5'))).toContain('Source culture: Simplified Chinese (zh-Hans)');
+    expect(JSON.stringify(buildJudgeParams(zh, group!, new Map(), 'claude-sonnet-5'))).toContain('Source culture: Simplified Chinese (zh-Hans)');
+    expect(TRANSLATE_RULES).not.toMatch(/English/);
+    expect(JUDGE_RULES).not.toMatch(/English/);
+  });
+
+  it('cultureContext takes the source culture from the store', () => {
+    const store = seeded();
+    store.setNativeCulture('zh-Hans');
+    expect(cultureContext(store, 'en', '').sourceCulture).toBe('zh-Hans');
   });
 });

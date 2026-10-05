@@ -19,7 +19,7 @@ export interface ArchiveEntry {
   namespace: string;
   key: string;
   translation: string;
-  // The English text this translation was made for: Push ignores an entry whose source differs from
+  // The source text (native culture) this translation was made for: Push ignores an entry whose source differs from
   // the unit's current source, or that repeats a text LocHub itself produced earlier for this cell.
   source: string;
 }

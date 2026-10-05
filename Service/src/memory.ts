@@ -10,7 +10,7 @@ export interface TmMatch {
 
 const TM_STATUSES: ReadonlySet<string> = new Set(['approved', 'edited', 'human_edit']);
 
-// Exact translation memory: the same English text already has a human-confirmed translation.
+// Exact translation memory: the same source text already has a human-confirmed translation.
 // The first donor by unit id wins, so the result does not depend on load order.
 export function buildTmIndex(store: LocHubStore, culture: Culture): Map<string, TmMatch> {
   const index = new Map<string, TmMatch>();

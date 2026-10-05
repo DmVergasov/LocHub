@@ -58,6 +58,20 @@ describe('precheck', () => {
     expect(hasHardIssues(issues)).toBe(false);
   });
 
+  // A Chinese, Japanese or Korean word is often one or two characters: a short CJK source copied verbatim into an
+  // English translation is untranslated, even though it is shorter than the three letters a Latin word needs.
+  it('flags a short CJK source copied verbatim', () => {
+    expect(codesIn('en', '设置', '设置')).toEqual(['untranslated']);
+    expect(codesIn('en', '開始', '開始')).toEqual(['untranslated']);
+    expect(codesIn('en', 'はい', 'はい')).toEqual(['untranslated']);
+    expect(codesIn('en', '확인', '확인')).toEqual(['untranslated']);
+  });
+
+  it('does not flag a CJK do-not-translate term kept verbatim, or CJK punctuation alone', () => {
+    expect(codes('原神', '原神', ['原神'])).toEqual([]);
+    expect(codes('OK。', 'OK。')).toEqual([]);
+  });
+
   it('rejects an empty translation', () => {
     expect(codes('Load', '   ')).toEqual(['empty']);
   });

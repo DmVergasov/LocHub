@@ -32,7 +32,7 @@ function setup() {
   return { fake, api: new LocHubApi('', fake.fetch), pause, count };
 }
 
-function renderActions(s: ReturnType<typeof setup>, binding: Partial<UeLocHubBinding>) {
+function renderActions(s: ReturnType<typeof setup>, binding: Partial<UeLocHubBinding>, nativeCulture = 'en') {
   const bridge = new EditorBridge(s.api, () => ({ openorigin: noop, setpreviewculture: noop, applylive: noop, ...binding }) as UeLocHubBinding);
   const onImported = vi.fn();
   const rows = rowsFromState(s.fake.state, ['ru']);
@@ -42,7 +42,7 @@ function renderActions(s: ReturnType<typeof setup>, binding: Partial<UeLocHubBin
       bridge={bridge}
       culture="ru"
       cultures={['de', 'ru']}
-      nativeCulture="en"
+      nativeCulture={nativeCulture}
       filtered={rows.slice(0, 2)}
       totalCount={rows.length}
       onImported={onImported}
@@ -125,6 +125,51 @@ describe('ExchangeActions', () => {
       expect([name, fileTypes]).toEqual(['lochub-de.xlf', 'XLIFF files (*.xlf)|*.xlf|All files (*.*)|*.*']);
       expect(text).toContain('source-language="en" target-language="de" datatype="plaintext" date="2026-09-27T10:00:00.000Z"');
       expect(text!.match(/<trans-unit /g)).toHaveLength(3);
+    });
+
+    it("writes the target's native culture as the XLIFF source language", async () => {
+      const user = userEvent.setup();
+      const s = setup();
+      const saved: string[] = [];
+      renderActions(s, {
+        savetextfile: (_title: string, _name: string, _fileTypes: string, text: string) => {
+          saved.push(text);
+          return JSON.stringify({ cancelled: false, path: 'D:/x/lochub-ru.xlf' });
+        },
+      }, 'zh-Hans');
+
+      await user.click(screen.getByRole('button', { name: 'Export…' }));
+      await user.selectOptions(screen.getByLabelText('Export format'), 'xliff');
+      await user.click(within(screen.getByRole('dialog', { name: 'Export translations' })).getByRole('button', { name: 'Export' }));
+
+      await screen.findByText('Saved to D:/x/lochub-ru.xlf');
+      expect(saved[0]).toContain('source-language="zh-Hans" target-language="ru"');
+    });
+
+    it('does not guess the XLIFF source language: Export waits for a Push to report it', async () => {
+      const user = userEvent.setup();
+      const s = setup();
+      const savetextfile = vi.fn(() => JSON.stringify({ cancelled: false, path: 'D:/x/out' }));
+      renderActions(s, { savetextfile }, '');
+
+      await user.click(screen.getByRole('button', { name: 'Export…' }));
+      await user.selectOptions(screen.getByLabelText('Export format'), 'xliff');
+      const dialog = screen.getByRole('dialog', { name: 'Export translations' });
+      expect((within(dialog).getByRole('button', { name: 'Export' }) as HTMLButtonElement).disabled).toBe(true);
+      expect(within(dialog).getByText('Push, then Refresh, so LocHub knows the source culture: XLIFF needs it.')).toBeTruthy();
+      expect(savetextfile).not.toHaveBeenCalled();
+    });
+
+    it('still exports CSV while the source culture is unknown', async () => {
+      const user = userEvent.setup();
+      const s = setup();
+      renderActions(s, { savetextfile: () => JSON.stringify({ cancelled: false, path: 'D:/x/lochub-ru.csv' }) }, '');
+
+      await user.click(screen.getByRole('button', { name: 'Export…' }));
+      const dialog = screen.getByRole('dialog', { name: 'Export translations' });
+      expect(within(dialog).queryByText('Push, then Refresh, so LocHub knows the source culture: XLIFF needs it.')).toBeNull();
+      await user.click(within(dialog).getByRole('button', { name: 'Export' }));
+      expect(await screen.findByText('Saved to D:/x/lochub-ru.csv')).toBeTruthy();
     });
 
     it('captures the export date before the paged cells fetch, not after', async () => {

@@ -8,7 +8,13 @@ its API key, or, for Anthropic, signed in to Claude Code instead (see
 
 The example project below is called `MyGame`; substitute your own project's name.
 
-## 1. Choose your foreign cultures (optional)
+## 1. Choose your cultures (optional)
+
+The target's **native culture** is the language your source text is written in, and the one LocHub translates
+from. Set Up gives a new target the native culture in **Project Settings > Plugins > LocHub > Localization Target >
+Setup Native Culture** (`en` by default — set it to, for example, `zh-Hans` for a game written in Chinese, and list
+`en` among the foreign cultures). A target that already has a native culture keeps it; change it in the
+Localization Dashboard.
 
 LocHub sets up a `Game` localization target with a default set of foreign cultures (**de, fr, es, ja**). If
 you want different languages, set them first in **Project Settings > Plugins > LocHub**, under

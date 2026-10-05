@@ -161,8 +161,9 @@ export function precheck(source: string, translation: string, culture: string, o
       issues.push({ code: 'dnt', severity: 'confirm', message: `Do-not-translate term "${term}" must stay verbatim` });
   }
 
+  // Three letters make a Latin-script word worth translating; one Chinese, Japanese or Korean character already does.
   const withoutDnt = opts.dntTerms.reduce((acc, t) => acc.split(t).join(''), source);
-  if (translation.trim() === source.trim() && /\p{L}{3,}/u.test(withoutDnt))
+  if (translation.trim() === source.trim() && /\p{L}{3,}|[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(withoutDnt))
     issues.push({ code: 'untranslated', severity: 'soft', message: 'Translation is identical to the source' });
 
   // Not Unreal's rule but the project's: text over the limit is likely to overflow its widget.

@@ -5,7 +5,7 @@ import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LlmClient, LlmOutcome, LlmRequest } from './llm.js';
-import { systemTextOf, userTextOf } from './llmShared.js';
+import { approxTokens, systemTextOf, userTextOf } from './llmShared.js';
 
 // Every child is killed if it runs longer than this; a stuck `claude -p` must not hang a job forever.
 const CHILD_TIMEOUT_MS = 10 * 60 * 1000;
@@ -205,11 +205,10 @@ export class ClaudeCodeLlmClient implements LlmClient {
   }
 
   async countInputTokens(params: Anthropic.MessageCreateParamsNonStreaming): Promise<number> {
-    // Approximation, no network call: the subscription backend has no countTokens endpoint. ~3 chars/token
-    // is a reasonable average for English/JSON payloads; +1200 is the measured per-call CLI process overhead
-    // (process start, restricted tool listing, structured-output scaffolding) seen on 2026-09-26.
-    const chars = systemTextOf(params).length + userTextOf(params).length;
-    return Math.ceil(chars / 3) + 1200;
+    // Approximation, no network call: the subscription backend has no countTokens endpoint (approxTokens: ~3
+    // characters per token, one per CJK character); +1200 is the measured per-call CLI process overhead (process
+    // start, restricted tool listing, structured-output scaffolding) seen on 2026-09-26.
+    return approxTokens(systemTextOf(params) + userTextOf(params)) + 1200;
   }
 
   private async runOne(request: LlmRequest): Promise<LlmOutcome> {

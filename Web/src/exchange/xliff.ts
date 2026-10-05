@@ -186,7 +186,7 @@ export function readXliff(text: string, culture: string): ParsedImport {
       const codes = sourceEl ? codesById(sourceEl) : new Map<string, string>();
       const source = sourceEl ? segmentText(sourceEl, codes) : undefined;
       let translation = targetEl ? segmentText(targetEl, codes) : '';
-      // A pre-filled copy of the source is not a translation: importing it would write English as human work.
+      // A pre-filled copy of the source is not a translation: importing it would write the source text as human work.
       const isCopyOfSource = targetEl !== undefined && translation === source && COPY_SOURCE_STATES.has(targetEl.getAttribute('state') ?? '');
       if (isCopyOfSource) translation = '';
       const entry: ImportEntry = { text: translation, approved: unit.getAttribute('approved') === 'yes' };

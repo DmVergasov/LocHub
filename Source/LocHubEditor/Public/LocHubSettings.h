@@ -264,6 +264,10 @@ public:
 	UPROPERTY(EditAnywhere, config, Category = "Pull")
 	bool bWriteDevNotesToAssets = true;
 
+	/** The language the project's source text is written in, and the one LocHub translates from (for example en, or zh-Hans for a game written in Chinese). Tools > LocHub > Set Up Localization Target gives it to a target that has no native culture yet; a target that has one keeps it, change it in the Localization Dashboard. A name the engine does not know falls back to en. */
+	UPROPERTY(EditAnywhere, config, Category = "Localization Target")
+	FString SetupNativeCulture;
+
 	/** Cultures that Tools > LocHub > Set Up Localization Target adds next to the native culture. Set Up never removes a culture. */
 	UPROPERTY(EditAnywhere, config, Category = "Localization Target")
 	TArray<FString> SetupForeignCultures;
@@ -276,7 +280,7 @@ public:
 	UPROPERTY(EditAnywhere, config, Category = "Length Check", meta = (EditCondition = "bEnableLengthCheck"))
 	ELocHubLengthScope LengthCheckScope = ELocHubLengthScope::UiStrings;
 
-	/** A translation may be this many times as long as the English source, in visible characters: placeholders and tags count 0, CJK characters 2. Two decimals are used. */
+	/** A translation may be this many times as long as the source, in visible characters: placeholders and tags count 0, CJK characters 2. Two decimals are used. A Chinese, Japanese or Korean source translated into a Latin-script language needs a higher ratio, about 1.8. */
 	UPROPERTY(EditAnywhere, config, Category = "Length Check", meta = (ClampMin = "1.0", ClampMax = "5.0", EditCondition = "bEnableLengthCheck"))
 	float MaxLengthRatio = 1.3f;
 

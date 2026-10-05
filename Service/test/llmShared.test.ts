@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { LlmOutcome, LlmRequest } from '../src/llm.js';
 import {
+  approxInputTokens,
   approxOutputTokens,
+  approxTokens,
   fetchWithRetry,
   isFetchTimeout,
   isTimeoutMessage,
@@ -323,5 +325,36 @@ describe('runPool', () => {
       expect(sent).toEqual(['r0', 'r1', 'r2', 'r3']);
       expect(out.every((o) => o.kind === 'ok')).toBe(true);
     }
+  });
+});
+
+// The estimate (and the Max USD check that runs on it) uses these approximations on every provider without a free
+// token-count endpoint: CJK text is about one token per character, not one per three.
+describe('approxTokens', () => {
+  it('keeps the three-characters-per-token guess for Latin text', () => {
+    expect(approxTokens('')).toBe(0);
+    expect(approxTokens('abc')).toBe(1);
+    expect(approxTokens('abcd')).toBe(2);
+  });
+
+  it('counts each CJK character, CJK punctuation and fullwidth form as one token', () => {
+    expect(approxTokens('返回主菜单')).toBe(5);
+    expect(approxTokens('ゲームを終了')).toBe(6);
+    expect(approxTokens('게임 종료')).toBe(4 + 1);
+    expect(approxTokens('。！？')).toBe(3);
+    expect(approxTokens('ｈｅｌｌｏ')).toBe(5);
+  });
+
+  it('adds the CJK count to the Latin estimate for mixed text', () => {
+    expect(approxTokens('返回 Main')).toBe(2 + 2);
+  });
+
+  it('counts code points, so an emoji is one character, not two', () => {
+    expect(approxTokens('😀😀😀')).toBe(1);
+  });
+
+  it('makes approxInputTokens count a Chinese payload at least once per character', () => {
+    const params = { model: 'm', max_tokens: 1, system: 'R', messages: [{ role: 'user', content: '漢'.repeat(300) }] };
+    expect(approxInputTokens(params as never)).toBeGreaterThanOrEqual(300);
   });
 });

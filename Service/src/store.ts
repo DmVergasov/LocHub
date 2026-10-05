@@ -61,6 +61,10 @@ export class LocHubStore {
   // engine, not project data, so they do not belong in the committed Localization/LocHub. Every Push sends
   // them again, so a missing or unreadable file just means "nothing pushed yet" -- today's Node fallback.
   readonly pluralForms = new Map<Culture, PluralForms>();
+  // The localization target's native culture from the last real Push: the language every source text is written in,
+  // and the one the prompts name as the source. Persisted to nativeCulturePath (setNativeCulture) like the plural
+  // forms, so it survives the restart the editor runs on every AI setting change; '' until a Push reports it.
+  private nativeCultureValue: Culture = '';
 
   // Snapshot taken at load() and again at the end of every save(); changedOnDisk() compares against it.
   private fingerprint = new Map<string, FileStat>();
@@ -70,11 +74,13 @@ export class LocHubStore {
     // Absent for a caller that does not care about surviving a restart (most tests): pluralForms then behaves
     // exactly as before this fix, in-memory only.
     private readonly pluralFormsPath?: string,
+    // Absent for a caller that does not care about surviving a restart: the native culture then lives in memory only.
+    private readonly nativeCulturePath?: string,
   ) {}
 
-  static load(dataDir: string, pluralFormsPath?: string): LocHubStore {
+  static load(dataDir: string, pluralFormsPath?: string, nativeCulturePath?: string): LocHubStore {
     mkdirSync(dataDir, { recursive: true });
-    const store = new LocHubStore(dataDir, pluralFormsPath);
+    const store = new LocHubStore(dataDir, pluralFormsPath, nativeCulturePath);
     for (const unit of readJsonl<Unit>(join(dataDir, 'units.jsonl'))) store.units.set(unit.id, unit);
     for (const item of readJsonl<InboxItem>(join(dataDir, 'inbox.jsonl'))) store.inbox.set(item.id, item);
     for (const file of readdirSync(dataDir)) {
@@ -95,6 +101,7 @@ export class LocHubStore {
     }
     store.fingerprint = fingerprintOf(dataDir);
     store.loadPluralForms();
+    store.loadNativeCulture();
 
     // Same guard save() runs before writing, run here too: a checkout that already holds e.g. both
     // cells.ru.jsonl and cells.RU.jsonl (produced on a case-insensitive filesystem by two commits that
@@ -119,6 +126,37 @@ export class LocHubStore {
       }
     } catch (error) {
       console.warn(`${this.pluralFormsPath}: could not read the stored engine plural forms (${(error as Error).message}); using Node's own plural rules until the next Push`);
+    }
+  }
+
+  get nativeCulture(): Culture {
+    return this.nativeCultureValue;
+  }
+
+  // Called by a real Push with the target's native culture. Persists only when the value changes; like the plural
+  // forms file this is a cache of what the editor reports on every Push, so a write failure only logs.
+  setNativeCulture(culture: Culture): void {
+    if (culture === this.nativeCultureValue) return;
+    this.nativeCultureValue = culture;
+    if (!this.nativeCulturePath) return;
+    try {
+      mkdirSync(dirname(this.nativeCulturePath), { recursive: true });
+      writeFileAtomic(this.nativeCulturePath, canonicalJson({ nativeCulture: culture }));
+    } catch (error) {
+      console.warn(`${this.nativeCulturePath}: could not save the native culture (${(error as Error).message}); keeping it in memory only`);
+    }
+  }
+
+  // A missing file is the ordinary case (nothing pushed since Saved/ was last cleared): '' until the next Push. A
+  // present but unreadable file falls back the same way, with one operator-visible line.
+  private loadNativeCulture(): void {
+    if (!this.nativeCulturePath || !existsSync(this.nativeCulturePath)) return;
+    try {
+      const parsed = JSON.parse(readFileSync(this.nativeCulturePath, 'utf8')) as { nativeCulture?: unknown } | null;
+      if (parsed === null || typeof parsed !== 'object' || typeof parsed.nativeCulture !== 'string') throw new Error('no nativeCulture string');
+      this.nativeCultureValue = parsed.nativeCulture;
+    } catch (error) {
+      console.warn(`${this.nativeCulturePath}: could not read the stored native culture (${(error as Error).message}); it is unknown until the next Push`);
     }
   }
 

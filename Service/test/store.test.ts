@@ -433,3 +433,48 @@ describe('LocHubStore.load — persisted engine plural forms', () => {
     expect(restarted.pluralCategoriesFor('fr', 'cardinal')).toEqual(['one', 'other']);
   });
 });
+
+describe('LocHubStore native culture', () => {
+  function paths() {
+    const root = mkdtempSync(join(tmpdir(), 'lochub-native-'));
+    return {
+      data: join(root, 'Localization', 'LocHub'),
+      plural: join(root, 'Saved', 'LocHub', 'plural_forms.json'),
+      native: join(root, 'Saved', 'LocHub', 'native_culture.json'),
+    };
+  }
+
+  it('is empty until a Push sets it, then survives a reload', () => {
+    const p = paths();
+    const store = LocHubStore.load(p.data, p.plural, p.native);
+    expect(store.nativeCulture).toBe('');
+    store.setNativeCulture('zh-Hans');
+    expect(LocHubStore.load(p.data, p.plural, p.native).nativeCulture).toBe('zh-Hans');
+  });
+
+  it('follows a later change instead of keeping the first value', () => {
+    const p = paths();
+    LocHubStore.load(p.data, p.plural, p.native).setNativeCulture('zh-Hans');
+    LocHubStore.load(p.data, p.plural, p.native).setNativeCulture('en');
+    expect(LocHubStore.load(p.data, p.plural, p.native).nativeCulture).toBe('en');
+  });
+
+  it('starts empty and warns once when the stored file is unreadable', () => {
+    const p = paths();
+    LocHubStore.load(p.data, p.plural, p.native).setNativeCulture('ja');
+    writeFileSync(p.native, '{not json');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(LocHubStore.load(p.data, p.plural, p.native).nativeCulture).toBe('');
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps the value in memory when no path is given', () => {
+    const store = LocHubStore.load(mkdtempSync(join(tmpdir(), 'lochub-native-mem-')));
+    store.setNativeCulture('ko');
+    expect(store.nativeCulture).toBe('ko');
+  });
+});

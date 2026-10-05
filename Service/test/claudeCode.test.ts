@@ -200,6 +200,13 @@ describe('ClaudeCodeLlmClient', () => {
     const tokens = await client.countInputTokens(PARAMS);
     expect(tokens).toBe(Math.ceil(expectedChars / 3) + 1200);
   });
+
+  it('countInputTokens counts CJK text as one token per character', async () => {
+    const { runner } = fakeRunner(() => okJson({}));
+    const client = new ClaudeCodeLlmClient({ projectDir: 'P', runner });
+    const params = { ...PARAMS, messages: [{ role: 'user' as const, content: '暂停'.repeat(100) }] };
+    expect(await client.countInputTokens(params)).toBeGreaterThanOrEqual(200 + 1200);
+  });
 });
 
 describe('checkClaudeAuthStatus', () => {

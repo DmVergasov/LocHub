@@ -51,7 +51,7 @@ Next to **Estimate** is **Run without estimate**: it starts the job right away, 
 conditions as **Estimate** (a job already running for this culture, or the AI provider not ready), plus while
 an estimate or another job start is already in flight.
 
-**Translation memory (TM) reuse**: if a unit's English source text exactly matches one already translated and
+**Translation memory (TM) reuse**: if a unit's source text exactly matches one already translated and
 approved/edited/human-written elsewhere in the project, the job reuses that translation directly — no model call,
 no cost. TM reuse (and any cached answer from an earlier identical request) is not counted in the estimate's
 `items`, only in its overall `strings` total.

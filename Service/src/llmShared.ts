@@ -87,17 +87,33 @@ export function effortOf(params: Params): string | undefined {
   return typeof effort === 'string' ? effort : undefined;
 }
 
-// No free token-count endpoint is used for these backends; about three characters per token is close enough
-// for an estimate the job report later replaces with real usage.
-export function approxInputTokens(params: Params): number {
-  return Math.ceil((systemTextOf(params).length + userTextOf(params).length) / 3);
+// Han, Hiragana, Katakana, Hangul, CJK symbols and punctuation, and fullwidth forms: about one token each.
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}　-〿＀-￯]/u;
+
+// About three characters per token for Latin-script text and JSON, but about one token per CJK character: the
+// estimate (and the Max USD check that runs on it) must not under-count a Chinese, Japanese or Korean payload two-
+// to three-fold. Counted per code point, so a character outside the BMP (an emoji) is one character, not two.
+export function approxTokens(text: string): number {
+  let cjk = 0;
+  let other = 0;
+  for (const ch of text) {
+    if (CJK.test(ch)) cjk++;
+    else other++;
+  }
+  return cjk + Math.ceil(other / 3);
 }
 
-// M-5: the same three-characters-per-token guess as approxInputTokens, for a proxy that omits `usage` (or omits
-// completion_tokens) from an otherwise-200 chat response -- 0 in/0 out on a priced Custom endpoint would otherwise
-// silently under-report cost.
+// No free token-count endpoint is used for these backends: approxTokens is close enough for an estimate the job
+// report later replaces with real usage.
+export function approxInputTokens(params: Params): number {
+  return approxTokens(systemTextOf(params) + userTextOf(params));
+}
+
+// M-5: the same approximation as approxInputTokens, for a proxy that omits `usage` (or omits completion_tokens)
+// from an otherwise-200 chat response -- 0 in/0 out on a priced Custom endpoint would otherwise silently
+// under-report cost.
 export function approxOutputTokens(text: string): number {
-  return Math.ceil(text.length / 3);
+  return approxTokens(text);
 }
 
 // The only environment variable the service reads a provider key from (key-contract.md §2). Kept as its own

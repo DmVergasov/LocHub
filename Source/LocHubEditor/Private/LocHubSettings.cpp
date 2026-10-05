@@ -16,6 +16,7 @@ ULocHubSettings::ULocHubSettings()
 	DeepSeekModels.JudgeModel = TEXT("deepseek-flash");
 	GeminiModels.TranslateModel = TEXT("gemini-3.8-flash");
 	GeminiModels.JudgeModel = TEXT("gemini-3.5-flash-lite");
+	SetupNativeCulture = TEXT("en");
 	SetupForeignCultures = { TEXT("de"), TEXT("fr"), TEXT("es"), TEXT("ja") };
 }
 
