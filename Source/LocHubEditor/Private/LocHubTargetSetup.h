@@ -10,7 +10,8 @@ struct FLocalizationTargetSettings;
 namespace LocHubTargetSetup
 {
 	inline constexpr const TCHAR* TargetName = TEXT("Game");
-	inline constexpr const TCHAR* NativeCulture = TEXT("en");
+	/** Native culture Set Up gives a target that has none, when Setup Native Culture is empty or not a culture. */
+	inline constexpr const TCHAR* DefaultNativeCulture = TEXT("en");
 
 	/** Whether the engine's Internationalization system recognizes InName as a real culture; on success,
 	 *  OutCanonicalName gets the engine's canonical spelling. Same rule the Localization Dashboard's culture
@@ -19,9 +20,11 @@ namespace LocHubTargetSetup
 	bool IsKnownCulture(const FString& InName, FString& OutCanonicalName);
 
 	/** Adds the missing pieces to the settings; one line per change, empty when nothing was missing.
-	 *  InIsKnownCulture (see IsKnownCulture) decides which entries of InForeignCultures are real cultures;
-	 *  the others are skipped and named together in one change line. */
-	TArray<FString> ConfigureTarget(FLocalizationTargetSettings& InOutSettings, bool bNewTarget, const TArray<FString>& InSourceDirs, const TArray<FString>& InContentDirs, const TArray<FString>& InForeignCultures, TFunctionRef<bool(const FString& InName, FString& OutCanonicalName)> InIsKnownCulture);
+	 *  InNativeCulture is used only by a target without a native culture; one that already has one keeps it.
+	 *  InIsKnownCulture (see IsKnownCulture) decides which names are real cultures: an unknown native culture
+	 *  falls back to DefaultNativeCulture, unknown entries of InForeignCultures are skipped, and each is named
+	 *  in a change line. */
+	TArray<FString> ConfigureTarget(FLocalizationTargetSettings& InOutSettings, bool bNewTarget, const TArray<FString>& InSourceDirs, const TArray<FString>& InContentDirs, const FString& InNativeCulture, const TArray<FString>& InForeignCultures, TFunctionRef<bool(const FString& InName, FString& OutCanonicalName)> InIsKnownCulture);
 
 	/** Next step for a target that has no culture besides the native one; empty otherwise. */
 	FString DescribeMissingForeignCultures(const FLocalizationTargetSettings& InSettings);

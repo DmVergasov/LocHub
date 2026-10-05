@@ -368,7 +368,7 @@ void FLocHubSyncRunner::PullOnExport(const FLocHubHttpResult& InResult)
 	const FLocHubImportResult Import = LocHubImport::Import(*Helper, CurrentCulture, Export.Entries, Context.GlyphChecker.Get());
 	Result.Written += Import.Written.Num();
 	Result.Rejected += Import.Rejected.Num();
-	Result.Details.Add(FString::Printf(TEXT("%s: %d written, %d rejected, %d skipped because the English text changed, %d skipped because the key is no longer gathered."),
+	Result.Details.Add(FString::Printf(TEXT("%s: %d written, %d rejected, %d skipped because the source text changed, %d skipped because the key is no longer gathered."),
 		*CurrentCulture, Import.Written.Num(), Import.Rejected.Num(), Import.SkippedStale, Import.SkippedUnknown));
 	for (const FLocHubAckRejected& Rejected : Import.Rejected)
 	{

@@ -33,18 +33,30 @@ namespace LocHubTargetSetupPrivate
 		return INDEX_NONE;
 	}
 
-	void EnsureCultures(FLocalizationTargetSettings& InOutSettings, const TArray<FString>& InForeignCultures, TFunctionRef<bool(const FString& InName, FString& OutCanonicalName)> InIsKnownCulture, TArray<FString>& OutChanges)
+	void EnsureCultures(FLocalizationTargetSettings& InOutSettings, const FString& InNativeCulture, const TArray<FString>& InForeignCultures, TFunctionRef<bool(const FString& InName, FString& OutCanonicalName)> InIsKnownCulture, TArray<FString>& OutChanges)
 	{
-		// Only a target without a valid native culture gets "en"; a native culture a person chose is kept.
+		// Only a target without a valid native culture gets the configured one; a native culture a person chose is kept.
 		if (!InOutSettings.SupportedCulturesStatistics.IsValidIndex(InOutSettings.NativeCultureIndex))
 		{
-			int32 NativeIndex = FindCulture(InOutSettings, LocHubTargetSetup::NativeCulture);
+			FString Native = LocHubTargetSetup::DefaultNativeCulture;
+			const FString Requested = InNativeCulture.TrimStartAndEnd();
+			FString Canonical;
+			if (!Requested.IsEmpty() && InIsKnownCulture(Requested, Canonical))
+			{
+				Native = Canonical;
+			}
+			else if (!Requested.IsEmpty())
+			{
+				OutChanges.Add(FString::Printf(TEXT("Unknown native culture \"%s\": used %s."), *Requested, LocHubTargetSetup::DefaultNativeCulture));
+			}
+
+			int32 NativeIndex = FindCulture(InOutSettings, Native);
 			if (NativeIndex == INDEX_NONE)
 			{
-				NativeIndex = InOutSettings.SupportedCulturesStatistics.Add(FCultureStatistics(FString(LocHubTargetSetup::NativeCulture)));
+				NativeIndex = InOutSettings.SupportedCulturesStatistics.Add(FCultureStatistics(Native));
 			}
 			InOutSettings.NativeCultureIndex = NativeIndex;
-			OutChanges.Add(FString::Printf(TEXT("Native culture: %s."), LocHubTargetSetup::NativeCulture));
+			OutChanges.Add(FString::Printf(TEXT("Native culture: %s."), *Native));
 		}
 
 		// Free-text entries the engine cannot resolve to a real culture (a typo like "dee" or "zz") are not
@@ -203,7 +215,7 @@ bool LocHubTargetSetup::IsKnownCulture(const FString& InName, FString& OutCanoni
 	return true;
 }
 
-TArray<FString> LocHubTargetSetup::ConfigureTarget(FLocalizationTargetSettings& InOutSettings, const bool bNewTarget, const TArray<FString>& InSourceDirs, const TArray<FString>& InContentDirs, const TArray<FString>& InForeignCultures, TFunctionRef<bool(const FString& InName, FString& OutCanonicalName)> InIsKnownCulture)
+TArray<FString> LocHubTargetSetup::ConfigureTarget(FLocalizationTargetSettings& InOutSettings, const bool bNewTarget, const TArray<FString>& InSourceDirs, const TArray<FString>& InContentDirs, const FString& InNativeCulture, const TArray<FString>& InForeignCultures, TFunctionRef<bool(const FString& InName, FString& OutCanonicalName)> InIsKnownCulture)
 {
 	TArray<FString> Changes;
 	if (InOutSettings.Name.IsEmpty())
@@ -211,7 +223,7 @@ TArray<FString> LocHubTargetSetup::ConfigureTarget(FLocalizationTargetSettings& 
 		InOutSettings.Name = TargetName;
 		Changes.Add(FString::Printf(TEXT("Target name: %s."), TargetName));
 	}
-	LocHubTargetSetupPrivate::EnsureCultures(InOutSettings, InForeignCultures, InIsKnownCulture, Changes);
+	LocHubTargetSetupPrivate::EnsureCultures(InOutSettings, InNativeCulture, InForeignCultures, InIsKnownCulture, Changes);
 	LocHubTargetSetupPrivate::EnsureTextFileGather(InOutSettings.GatherFromTextFiles, bNewTarget, InSourceDirs, Changes);
 	LocHubTargetSetupPrivate::EnsurePackageGather(InOutSettings.GatherFromPackages, InContentDirs, Changes);
 	if (bNewTarget)
@@ -250,7 +262,8 @@ bool LocHubTargetSetup::ApplyToProject(FString& OutSummary)
 	}
 
 	const FString ProjectDir = LocHubEnvironment::GetProjectDir();
-	TArray<FString> Changes = ConfigureTarget(Target->Settings, bNewTarget, LocHubEnvironment::GetGameSourceDirs(ProjectDir), LocHubEnvironment::GetGameContentDirs(ProjectDir), GetDefault<ULocHubSettings>()->SetupForeignCultures, &IsKnownCulture);
+	const ULocHubSettings* Settings = GetDefault<ULocHubSettings>();
+	TArray<FString> Changes = ConfigureTarget(Target->Settings, bNewTarget, LocHubEnvironment::GetGameSourceDirs(ProjectDir), LocHubEnvironment::GetGameContentDirs(ProjectDir), Settings->SetupNativeCulture, Settings->SetupForeignCultures, &IsKnownCulture);
 
 	// Copies the target settings into ULocalizationSettings and writes them to the default config file.
 	TargetSet->PostEditChange();
