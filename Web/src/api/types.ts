@@ -190,7 +190,7 @@ export interface Meta {
   cultures: string[];
 }
 
-// ApplyLive entry (CONTRACT.md, "Bridge commands"): source is the current English text of the unit.
+// ApplyLive entry (CONTRACT.md, "Bridge commands"): source is the current source text (native culture) of the unit.
 export interface LiveEntry {
   namespace: string;
   key: string;

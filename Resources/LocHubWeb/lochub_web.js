@@ -1526,8 +1526,9 @@ function ExchangeActions({ api: api2, bridge, culture, cultures, nativeCulture, 
     setError("");
     setNotice("");
   };
+  const sourceUnknown = format === "xliff" && nativeCulture === "";
   const runExport = async () => {
-    if (busy) return;
+    if (busy || sourceUnknown) return;
     setBusy(true);
     setError("");
     try {
@@ -1539,7 +1540,7 @@ function ExchangeActions({ api: api2, bridge, culture, cultures, nativeCulture, 
         setError("Nothing to export: no strings match.");
         return;
       }
-      const text = format === "csv" ? exchangeToCsv(rows) : exchangeToXliff(rows, { culture: exportCulture, sourceCulture: nativeCulture || "en", date: exportedAt });
+      const text = format === "csv" ? exchangeToCsv(rows) : exchangeToXliff(rows, { culture: exportCulture, sourceCulture: nativeCulture, date: exportedAt });
       const target = SAVE_AS[format];
       const name = `lochub-${exportCulture}.${target.extension}`;
       const saved = await saveTextFile(bridge, name, text, target.fileTypes, "Export translations", target.mime);
@@ -1647,8 +1648,9 @@ function ExchangeActions({ api: api2, bridge, culture, cultures, nativeCulture, 
           /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "all", children: `All strings (${totalCount})` })
         ] })
       ] }),
+      sourceUnknown && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "muted", children: "Push once so LocHub knows the source culture: XLIFF needs it." }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "actions", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", className: "primary", onClick: () => void runExport(), disabled: busy, children: "Export" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", className: "primary", onClick: () => void runExport(), disabled: busy || sourceUnknown, children: "Export" }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", onClick: close, disabled: busy, children: "Cancel" })
       ] })
     ] }),

@@ -88,7 +88,8 @@ export interface ExchangeActionsProps {
   // The Grid's active culture: the culture an import writes into, and the export's default.
   culture: string;
   cultures: readonly string[];
-  // XLIFF source-language; 'en' when the service does not know it yet (no Push since it started).
+  // XLIFF source-language: the target's native culture the service reports; '' until a Push has reported one, and
+  // then XLIFF export waits (CSV has no source-language field and is unaffected).
   nativeCulture: string;
   // The rows the Grid shows right now: "Strings matching the current filters".
   filtered: readonly GridRow[];
@@ -134,8 +135,10 @@ export function ExchangeActions({ api, bridge, culture, cultures, nativeCulture,
     setNotice('');
   };
 
+  const sourceUnknown = format === 'xliff' && nativeCulture === '';
+
   const runExport = async () => {
-    if (busy) return;
+    if (busy || sourceUnknown) return;
     setBusy(true);
     setError('');
     try {
@@ -151,7 +154,7 @@ export function ExchangeActions({ api, bridge, culture, cultures, nativeCulture,
         setError('Nothing to export: no strings match.');
         return;
       }
-      const text = format === 'csv' ? exchangeToCsv(rows) : exchangeToXliff(rows, { culture: exportCulture, sourceCulture: nativeCulture || 'en', date: exportedAt });
+      const text = format === 'csv' ? exchangeToCsv(rows) : exchangeToXliff(rows, { culture: exportCulture, sourceCulture: nativeCulture, date: exportedAt });
       const target = SAVE_AS[format];
       const name = `lochub-${exportCulture}.${target.extension}`;
       const saved = await saveTextFile(bridge, name, text, target.fileTypes, 'Export translations', target.mime);
@@ -285,8 +288,9 @@ export function ExchangeActions({ api, bridge, culture, cultures, nativeCulture,
               <option value="all">{`All strings (${totalCount})`}</option>
             </select>
           </label>
+          {sourceUnknown && <p className="muted">Push once so LocHub knows the source culture: XLIFF needs it.</p>}
           <div className="actions">
-            <button type="button" className="primary" onClick={() => void runExport()} disabled={busy}>
+            <button type="button" className="primary" onClick={() => void runExport()} disabled={busy || sourceUnknown}>
               Export
             </button>
             <button type="button" onClick={close} disabled={busy}>
