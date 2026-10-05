@@ -227,8 +227,10 @@ export function richTextTagsBalanced(source: string, translation: string): boole
   return src.opening === tr.opening && src.closing === tr.closing;
 }
 
+// Trailing sentence punctuation, ASCII and fullwidth (a Chinese, Japanese or Korean source ends with 。！？ and the
+// like). \s already covers the ideographic space U+3000.
 export function normalizeForCosmetic(s: string): string {
-  return s.toLowerCase().replace(/\s+/g, ' ').trim().replace(/[.!?…:;,]+$/u, '').trim();
+  return s.toLowerCase().replace(/\s+/g, ' ').trim().replace(/[.!?…:;,。！？：；，、]+$/u, '').trim();
 }
 
 // A cosmetic change keeps approvals: case, whitespace or trailing punctuation only, same arguments and tags.

@@ -125,4 +125,18 @@ describe('isCosmeticChange', () => {
     expect(isCosmeticChange('Load', 'Load')).toBe(false);
     expect(isCosmeticChange('Load the truck', 'Unload the truck')).toBe(false);
   });
+
+  // A Chinese, Japanese or Korean source ends sentences with fullwidth punctuation and may use the ideographic
+  // space: editing only those must keep approvals, exactly as it does for ASCII punctuation in an English source.
+  it('treats trailing fullwidth punctuation and the ideographic space as cosmetic', () => {
+    expect(isCosmeticChange('返回主菜单。', '返回主菜单')).toBe(true);
+    expect(isCosmeticChange('返回主菜单！', '返回主菜单？')).toBe(true);
+    expect(isCosmeticChange('确定，', '确定')).toBe(true);
+    expect(isCosmeticChange('新的　游戏', '新的 游戏')).toBe(true);
+  });
+
+  it('is false for a real rewrite of a Chinese source', () => {
+    expect(isCosmeticChange('返回主菜单', '退出游戏')).toBe(false);
+    expect(isCosmeticChange('返回主菜单。', '返回主菜单吗？')).toBe(false);
+  });
 });
