@@ -33,7 +33,7 @@ Each cell shows the translated text plus a small status badge:
 | Edited | A human edited the AI draft before approving it |
 | Human | The translation was written by a human from scratch |
 | Rejected | A human rejected the draft; it goes back to translation |
-| Outdated | The cell has text, but the source (English) string has changed since it was translated |
+| Outdated | The cell has text, but the source string (native culture) has changed since it was translated |
 
 A cell still loading shows "Loading…"; a cell whose fetch failed renders blank instead of loading forever.
 
@@ -233,7 +233,7 @@ translation:
 
 - **Header** — namespace / key, the triage band chip (hidden in the Review queue), the status chip, and an
   "outdated" chip if the source moved since this text was translated.
-- **Source** — the English text; if outdated, also "Translated from: \<the older source text\>".
+- **Source** — the source text (in the target's native culture); if outdated, also "Translated from: \<the older source text\>".
 - **Translation** — an editable text box, a **length counter** under it when the string has a Length Check limit
   (visible characters of your text / the limit, highlighted once the text is over), the format check of the current
   text (it runs as the panel opens and again as you type; see [Format checks](#format-checks)), and the action

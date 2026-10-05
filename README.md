@@ -2,10 +2,10 @@
 
 English · [简体中文](README.zh-CN.md)
 
-AI-assisted localization for Unreal Engine 5.6–5.8: translate your project's text with your own AI — Claude,
-GPT, Gemini, DeepSeek, Grok or a local model through Ollama or LM Studio — let built-in checks and a second AI
-catch the problems, review everything in one grid inside the editor, and pull it back as plain Unreal
-localization data.
+AI-assisted localization for Unreal Engine 5.6–5.8: translate your project's text — from English, Chinese or any
+other source language — with your own AI (Claude, GPT, Gemini, DeepSeek, Grok or a local model through Ollama or
+LM Studio), let built-in checks and a second AI catch the problems, review everything in one grid inside the
+editor, and pull it back as plain Unreal localization data.
 
 **Free for non-commercial use** — personal projects, education, game jams, free games ·
 commercial license on [Fab](https://www.fab.com/listings/aaf6a7ae-e02e-4975-91b4-129e2456e491) ·
@@ -88,7 +88,7 @@ workflow around it.
   issues come in tiers: a **hard** issue (broken format arguments, dropped rich-text tags, invalid syntax)
   blocks Approve and Save outright; a **confirm** issue (a plural form modifier lost, an argument possibly
   missing) can be approved or saved anyway once a human has looked at it.
-- **Length Check** — flags translations that would overflow your UI: each UI string gets a limit from its English
+- **Length Check** — flags translations that would overflow your UI: each UI string gets a limit from its source
   length (Chinese, Japanese and Korean characters count double, placeholders and tags not at all), the AI is told the
   limit up front, and the cell panel counts characters as you type. Settings in Project Settings > Plugins > LocHub >
   Length Check.

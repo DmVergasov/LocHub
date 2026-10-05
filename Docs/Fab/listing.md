@@ -86,6 +86,7 @@ follow development there.
 ## Key features (compact list for Fab's "Features" field)
 
 - Format arguments, plural forms and rich-text tags validated in code, twice, before anything is written.
+- Any source language: LocHub translates from the target's native culture, English, Chinese or any other.
 - Optional AI judge that rates every translation's issues by severity and suggests fixes.
 - Human edits are never overwritten; changed source text marks translations outdated.
 - Release policy: ship only human-approved strings, or everything that passed the checks.

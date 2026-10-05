@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 3,
-	"VersionName": "1.1.0",
+	"Version": 4,
+	"VersionName": "1.2.0",
 	"FriendlyName": "LocHub",
 	"Description": "AI-assisted localization in the editor: translate your project's text with your own AI provider key, review it in one place and pull it back into the localization archives.",
 	"Category": "Localization",
