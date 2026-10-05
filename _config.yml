@@ -1,0 +1,17 @@
+title: LocHub
+description: >-
+  AI-assisted localization for Unreal Engine 5.6–5.8. Translate your project's text with your own AI
+  (Claude, GPT, Gemini, DeepSeek or a local model), catch broken placeholders and plurals automatically,
+  review everything in the editor.
+url: https://dmvergasov.github.io
+baseurl: /LocHub
+author: Dmitry Vergasov
+github_username: DmVergasov
+theme: minima
+show_excerpts: true
+plugins:
+  - jekyll-feed
+  - jekyll-sitemap
+  - jekyll-seo-tag
+exclude:
+  - README.md
