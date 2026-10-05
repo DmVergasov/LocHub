@@ -1,5 +1,7 @@
 # LocHub
 
+English · [简体中文](README.zh-CN.md)
+
 AI-assisted localization for Unreal Engine 5.6–5.8: translate your project's text with your own AI — Claude,
 GPT, Gemini, DeepSeek, Grok or a local model through Ollama or LM Studio — let built-in checks and a second AI
 catch the problems, review everything in one grid inside the editor, and pull it back as plain Unreal
