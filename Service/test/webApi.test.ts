@@ -55,8 +55,57 @@ describe('web-only API', () => {
     await makeServer().inject({ method: 'POST', url: '/api/push', payload: snapshot });
     store.putCell({ ...emptyCell(idA, 'fr'), text: 'PAUSE', status: 'edited' });
     const meta = (await makeServer().inject({ method: 'GET', url: '/api/meta' })).json();
-    expect(meta.nativeCulture).toBe('');
+    expect(meta.nativeCulture).toBe('en');
     expect(meta.cultures).toContain('fr');
+  });
+
+  describe('native culture', () => {
+    function reloadable() {
+      const root = mkdtempSync(join(tmpdir(), 'lochub-webapi-native-'));
+      const args = [join(root, 'Localization', 'LocHub'), join(root, 'Saved', 'LocHub', 'plural_forms.json'), join(root, 'Saved', 'LocHub', 'native_culture.json')] as const;
+      return () => LocHubStore.load(...args);
+    }
+    const zh = { ...snapshot, nativeCulture: 'zh-Hans', cultures: ['zh-Hans', 'en', 'ja'] };
+
+    it('is reported after the service restarts from disk, and is not a translation culture', async () => {
+      const load = reloadable();
+      store = load();
+      await makeServer().inject({ method: 'POST', url: '/api/push', payload: zh });
+      // Cells left over for both the native culture (from before it became native) and a real target culture.
+      store.putCell({ ...emptyCell(idA, 'zh-Hans'), text: '暂停', status: 'edited' });
+      store.putCell({ ...emptyCell(idA, 'en'), text: 'PAUSED', status: 'edited' });
+      store.save();
+      store = load();
+      expect((await makeServer().inject({ method: 'GET', url: '/api/meta' })).json()).toEqual({ nativeCulture: 'zh-Hans', cultures: ['en'] });
+    });
+
+    it('follows a change of the native culture in a later Push', async () => {
+      const load = reloadable();
+      store = load();
+      const app = makeServer();
+      await app.inject({ method: 'POST', url: '/api/push', payload: zh });
+      await app.inject({ method: 'POST', url: '/api/push', payload: { ...zh, nativeCulture: 'en', cultures: ['en', 'zh-Hans'] } });
+      store = load();
+      expect((await makeServer().inject({ method: 'GET', url: '/api/meta' })).json().nativeCulture).toBe('en');
+    });
+
+    it('is not changed by a dry-run Push', async () => {
+      const load = reloadable();
+      store = load();
+      const app = makeServer();
+      await app.inject({ method: 'POST', url: '/api/push', payload: zh });
+      await app.inject({ method: 'POST', url: '/api/push?dryRun=1', payload: { ...zh, nativeCulture: 'ja' } });
+      expect((await app.inject({ method: 'GET', url: '/api/meta' })).json().nativeCulture).toBe('zh-Hans');
+      store = load();
+      expect(store.nativeCulture).toBe('zh-Hans');
+    });
+
+    it('is en when a Push does not say (an older plugin)', async () => {
+      const app = makeServer();
+      const { nativeCulture: _omitted, ...withoutNative } = snapshot;
+      await app.inject({ method: 'POST', url: '/api/push', payload: withoutNative });
+      expect((await app.inject({ method: 'GET', url: '/api/meta' })).json().nativeCulture).toBe('en');
+    });
   });
 
   it('records a reviewer question in the inbox', async () => {

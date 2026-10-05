@@ -213,8 +213,9 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   // Coverage is derived from code on every Push; it lives in memory only.
   let coverage: { pushedAt: string; findings: CoverageFinding[] } = { pushedAt: '', findings: [] };
 
-  // Target cultures of the last real Push; like coverage, it lives in memory only.
-  let lastPush: { nativeCulture: string; cultures: string[] } = { nativeCulture: '', cultures: [] };
+  // Target cultures of the last real Push; like coverage, they live in memory only. The native culture is kept by
+  // the store instead (store.nativeCulture), which persists it across restarts.
+  let lastPush: { cultures: string[] } = { cultures: [] };
 
   // Cultures of the last Push plus every culture that already has cells, minus the native (source) culture: the
   // same set /api/meta lists (so the Grid can only ever open one of these), shared here so /api/import refuses
@@ -222,7 +223,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   function translationCultures(): Set<string> {
     const cultures = new Set<string>(lastPush.cultures);
     for (const [culture, cells] of store.cells) if (cells.size > 0) cultures.add(culture);
-    cultures.delete(lastPush.nativeCulture);
+    cultures.delete(store.nativeCulture);
     return cultures;
   }
 
@@ -287,10 +288,9 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     const report = applySnapshot(store, full, 'push', { dryRun });
     if (dryRun) return report;
     if (Array.isArray(full.coverage)) coverage = { pushedAt: new Date().toISOString(), findings: full.coverage };
-    lastPush = {
-      nativeCulture: typeof full.nativeCulture === 'string' ? full.nativeCulture : '',
-      cultures: Array.isArray(full.cultures) ? full.cultures.filter((c): c is string => typeof c === 'string') : [],
-    };
+    lastPush = { cultures: Array.isArray(full.cultures) ? full.cultures.filter((c): c is string => typeof c === 'string') : [] };
+    // A Push that does not report a native culture comes from a plugin older than 1.2.0, which only knew English.
+    store.setNativeCulture(typeof full.nativeCulture === 'string' && full.nativeCulture !== '' ? full.nativeCulture : 'en');
     store.save();
     return report;
   });
@@ -666,7 +666,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   // "FR" next to a stored "fr", or a malformed code) would fail the whole grid.
   app.get('/api/meta', async () => {
     const usable = [...translationCultures()].filter((culture) => checkCulture(store, culture) === null);
-    return { nativeCulture: lastPush.nativeCulture, cultures: usable.sort(compareCodeUnits) };
+    return { nativeCulture: store.nativeCulture, cultures: usable.sort(compareCodeUnits) };
   });
 
   // A reviewer's "needs context" (queue key N) lands in the inbox next to the model's own questions.
