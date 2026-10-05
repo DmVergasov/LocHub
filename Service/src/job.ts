@@ -112,6 +112,7 @@ const SHORTEN_INSTRUCTION = 'Shorten it while keeping the meaning, every placeho
 export function cultureContext(store: LocHubStore, culture: Culture, brief: string): CultureContext {
   return {
     culture,
+    sourceCulture: store.nativeCulture,
     brief,
     style: store.style.get(culture) ?? '',
     glossary: store.glossary.get(culture) ?? [],
