@@ -948,7 +948,7 @@ function precheck(source, translation, culture, opts) {
       issues.push({ code: "dnt", severity: "confirm", message: `Do-not-translate term "${term}" must stay verbatim` });
   }
   const withoutDnt = opts.dntTerms.reduce((acc, t) => acc.split(t).join(""), source);
-  if (translation.trim() === source.trim() && new RegExp("\\p{L}{3,}", "u").test(withoutDnt))
+  if (translation.trim() === source.trim() && new RegExp("\\p{L}{3,}|[\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}]", "u").test(withoutDnt))
     issues.push({ code: "untranslated", severity: "soft", message: "Translation is identical to the source" });
   if (opts.length) {
     const length = visibleLength(translation);
