@@ -1,3 +1,8 @@
 * text=auto eol=lf
 *.png binary
 *.bat text eol=crlf
+# Committed build output (see AGENTS.md): collapsed in diffs and left out of GitHub's language statistics.
+Resources/LocHubService/** linguist-generated
+Resources/LocHubWeb/** linguist-generated
+Source/ThirdParty/LocHubNodeDeps/** linguist-generated
+Source/ThirdParty/LocHubWebDeps/** linguist-generated

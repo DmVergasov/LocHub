@@ -78,6 +78,11 @@ Only what a translation needs — the strings, their notes and your glossary —
 AI provider under your own key (or, under a Claude subscription, to your own signed-in Claude Code CLI). With a
 local model on a Custom endpoint, nothing leaves your machine at all.
 
+## Source code
+
+LocHub's full source is on GitHub: https://github.com/DmVergasov/LocHub — browse the code, report issues and
+follow development there.
+
 ## Key features (compact list for Fab's "Features" field)
 
 - Format arguments, plural forms and rich-text tags validated in code, twice, before anything is written.
