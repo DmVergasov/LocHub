@@ -170,11 +170,21 @@ function effortOf(params) {
   const effort = params.output_config?.effort;
   return typeof effort === "string" ? effort : void 0;
 }
+var CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}　-〿＀-￯]/u;
+function approxTokens(text) {
+  let cjk = 0;
+  let other = 0;
+  for (const ch of text) {
+    if (CJK.test(ch)) cjk++;
+    else other++;
+  }
+  return cjk + Math.ceil(other / 3);
+}
 function approxInputTokens(params) {
-  return Math.ceil((systemTextOf(params).length + userTextOf(params).length) / 3);
+  return approxTokens(systemTextOf(params) + userTextOf(params));
 }
 function approxOutputTokens(text) {
-  return Math.ceil(text.length / 3);
+  return approxTokens(text);
 }
 var KEY_ENV_VAR = "LOCHUB_API_KEY";
 var SECRET_SHAPED_PATTERNS = [
@@ -716,7 +726,7 @@ function richTextTagsBalanced(source, translation) {
   return src.opening === tr.opening && src.closing === tr.closing;
 }
 function normalizeForCosmetic(s) {
-  return s.toLowerCase().replace(/\s+/g, " ").trim().replace(/[.!?…:;,]+$/u, "").trim();
+  return s.toLowerCase().replace(/\s+/g, " ").trim().replace(/[.!?…:;,。！？：；，、]+$/u, "").trim();
 }
 function isCosmeticChange(before, after) {
   if (before === after) return false;
@@ -1399,9 +1409,20 @@ function answersByUnit(store) {
 }
 
 // src/prompt.ts
-var PROMPT_VERSION = "translate-v2";
+var PROMPT_VERSION = "translate-v3";
+var LANGUAGE_NAMES = new Intl.DisplayNames(["en"], { type: "language", fallback: "none" });
+function describeCulture(code) {
+  if (code === "") return "the source language";
+  let name;
+  try {
+    name = LANGUAGE_NAMES.of(code);
+  } catch {
+    name = void 0;
+  }
+  return name ? `${name} (${code})` : `the source language (${code})`;
+}
 var TRANSLATE_RULES = [
-  "You translate video game strings from English into the target culture for an Unreal Engine 5 game.",
+  "You translate video game strings from the source culture into the target culture for an Unreal Engine 5 game.",
   "Hard rules:",
   "- Keep every {Argument} exactly as written: same names, same case. Never translate argument names.",
   "- Keep format modifiers {Arg}|plural(...), {Arg}|ordinal(...), {Arg}|gender(...), {Arg}|hpp(...).",
@@ -1428,7 +1449,7 @@ var TRANSLATE_RULES = [
   "Return exactly one result per input id."
 ].join("\n");
 var JUDGE_RULES = [
-  "You review translations of video game strings from English into the target culture.",
+  "You review translations of video game strings from the source culture into the target culture.",
   "Report only real problems: wrong meaning, wrong or inconsistent terminology against the glossary,",
   "ungrammatical or unnatural target text, wrong tone or register against the style guide, broken locale conventions.",
   "severity: critical = misleads the player or is offensive; major = wrong meaning or clearly wrong grammar;",
@@ -1484,6 +1505,7 @@ var JUDGE_SCHEMA = {
 function buildCultureBlock(ctx) {
   const glossary = ctx.glossary.length === 0 ? "(empty)" : ctx.glossary.map((t) => t.dnt ? `- ${t.term} => DNT (keep verbatim)` : `- ${t.term} => ${t.translation}${t.note ? ` (${t.note})` : ""}`).join("\n");
   return [
+    `Source culture: ${describeCulture(ctx.sourceCulture ?? "")}`,
     `Target culture: ${ctx.culture}`,
     `Plural categories (cardinal): ${(ctx.plurals?.cardinal ?? pluralCategories(ctx.culture, "cardinal")).join(", ")}`,
     `Plural categories (ordinal): ${(ctx.plurals?.ordinal ?? pluralCategories(ctx.culture, "ordinal")).join(", ")}`,
@@ -1579,6 +1601,7 @@ var SHORTEN_INSTRUCTION = "Shorten it while keeping the meaning, every placehold
 function cultureContext(store, culture, brief) {
   return {
     culture,
+    sourceCulture: store.nativeCulture,
     brief,
     style: store.style.get(culture) ?? "",
     glossary: store.glossary.get(culture) ?? [],
@@ -2206,8 +2229,7 @@ var ClaudeCodeLlmClient = class {
     throw new Error("Batch mode needs an API key (LocHub AI Backend = API Key).");
   }
   async countInputTokens(params) {
-    const chars = systemTextOf(params).length + userTextOf(params).length;
-    return Math.ceil(chars / 3) + 1200;
+    return approxTokens(systemTextOf(params) + userTextOf(params)) + 1200;
   }
   async runOne(request) {
     const promptFile = join3(this.promptsDir, `${request.customId}-${randomUUID()}.txt`);
@@ -3073,9 +3095,10 @@ function fingerprintsEqual(a, b) {
   return true;
 }
 var LocHubStore = class _LocHubStore {
-  constructor(dataDir, pluralFormsPath) {
+  constructor(dataDir, pluralFormsPath, nativeCulturePath) {
     this.dataDir = dataDir;
     this.pluralFormsPath = pluralFormsPath;
+    this.nativeCulturePath = nativeCulturePath;
   }
   units = /* @__PURE__ */ new Map();
   cells = /* @__PURE__ */ new Map();
@@ -3087,11 +3110,15 @@ var LocHubStore = class _LocHubStore {
   // engine, not project data, so they do not belong in the committed Localization/LocHub. Every Push sends
   // them again, so a missing or unreadable file just means "nothing pushed yet" -- today's Node fallback.
   pluralForms = /* @__PURE__ */ new Map();
+  // The localization target's native culture from the last real Push: the language every source text is written in,
+  // and the one the prompts name as the source. Persisted to nativeCulturePath (setNativeCulture) like the plural
+  // forms, so it survives the restart the editor runs on every AI setting change; '' until a Push reports it.
+  nativeCultureValue = "";
   // Snapshot taken at load() and again at the end of every save(); changedOnDisk() compares against it.
   fingerprint = /* @__PURE__ */ new Map();
-  static load(dataDir, pluralFormsPath) {
+  static load(dataDir, pluralFormsPath, nativeCulturePath) {
     mkdirSync4(dataDir, { recursive: true });
-    const store = new _LocHubStore(dataDir, pluralFormsPath);
+    const store = new _LocHubStore(dataDir, pluralFormsPath, nativeCulturePath);
     for (const unit of readJsonl(join5(dataDir, "units.jsonl"))) store.units.set(unit.id, unit);
     for (const item of readJsonl(join5(dataDir, "inbox.jsonl"))) store.inbox.set(item.id, item);
     for (const file of readdirSync(dataDir)) {
@@ -3112,6 +3139,7 @@ var LocHubStore = class _LocHubStore {
     }
     store.fingerprint = fingerprintOf(dataDir);
     store.loadPluralForms();
+    store.loadNativeCulture();
     assertNoCaseCollisions([store.cells.keys(), store.glossary.keys(), store.style.keys()]);
     return store;
   }
@@ -3130,6 +3158,34 @@ var LocHubStore = class _LocHubStore {
       }
     } catch (error) {
       console.warn(`${this.pluralFormsPath}: could not read the stored engine plural forms (${error.message}); using Node's own plural rules until the next Push`);
+    }
+  }
+  get nativeCulture() {
+    return this.nativeCultureValue;
+  }
+  // Called by a real Push with the target's native culture. Persists only when the value changes; like the plural
+  // forms file this is a cache of what the editor reports on every Push, so a write failure only logs.
+  setNativeCulture(culture) {
+    if (culture === this.nativeCultureValue) return;
+    this.nativeCultureValue = culture;
+    if (!this.nativeCulturePath) return;
+    try {
+      mkdirSync4(dirname(this.nativeCulturePath), { recursive: true });
+      writeFileAtomic3(this.nativeCulturePath, canonicalJson({ nativeCulture: culture }));
+    } catch (error) {
+      console.warn(`${this.nativeCulturePath}: could not save the native culture (${error.message}); keeping it in memory only`);
+    }
+  }
+  // A missing file is the ordinary case (nothing pushed since Saved/ was last cleared): '' until the next Push. A
+  // present but unreadable file falls back the same way, with one operator-visible line.
+  loadNativeCulture() {
+    if (!this.nativeCulturePath || !existsSync3(this.nativeCulturePath)) return;
+    try {
+      const parsed = JSON.parse(readFileSync3(this.nativeCulturePath, "utf8"));
+      if (parsed === null || typeof parsed !== "object" || typeof parsed.nativeCulture !== "string") throw new Error("no nativeCulture string");
+      this.nativeCultureValue = parsed.nativeCulture;
+    } catch (error) {
+      console.warn(`${this.nativeCulturePath}: could not read the stored native culture (${error.message}); it is unknown until the next Push`);
     }
   }
   // True when a data file save() would write has been added, removed or changed since load() or the last
@@ -3622,11 +3678,11 @@ function buildServer(deps) {
     return payload;
   });
   let coverage = { pushedAt: "", findings: [] };
-  let lastPush = { nativeCulture: "", cultures: [] };
+  let lastPush = { cultures: [] };
   function translationCultures() {
     const cultures = new Set(lastPush.cultures);
     for (const [culture, cells] of store.cells) if (cells.size > 0) cultures.add(culture);
-    cultures.delete(lastPush.nativeCulture);
+    cultures.delete(store.nativeCulture);
     return cultures;
   }
   app.get("/api/health", async () => {
@@ -3680,10 +3736,8 @@ function buildServer(deps) {
     const report = applySnapshot(store, full, "push", { dryRun });
     if (dryRun) return report;
     if (Array.isArray(full.coverage)) coverage = { pushedAt: (/* @__PURE__ */ new Date()).toISOString(), findings: full.coverage };
-    lastPush = {
-      nativeCulture: typeof full.nativeCulture === "string" ? full.nativeCulture : "",
-      cultures: Array.isArray(full.cultures) ? full.cultures.filter((c) => typeof c === "string") : []
-    };
+    lastPush = { cultures: Array.isArray(full.cultures) ? full.cultures.filter((c) => typeof c === "string") : [] };
+    store.setNativeCulture(typeof full.nativeCulture === "string" && full.nativeCulture !== "" ? full.nativeCulture : "en");
     store.save();
     return report;
   });
@@ -3964,7 +4018,7 @@ function buildServer(deps) {
   });
   app.get("/api/meta", async () => {
     const usable = [...translationCultures()].filter((culture) => checkCulture(store, culture) === null);
-    return { nativeCulture: lastPush.nativeCulture, cultures: usable.sort(compareCodeUnits) };
+    return { nativeCulture: store.nativeCulture, cultures: usable.sort(compareCodeUnits) };
   });
   app.post("/api/inbox", async (request, reply) => {
     store.assertFresh();
@@ -4133,7 +4187,7 @@ async function main() {
     console.error(config.error);
     process.exit(2);
   }
-  const store = LocHubStore.load(join7(config.projectDir, "Localization", "LocHub"), join7(config.projectDir, "Saved", "LocHub", "plural_forms.json"));
+  const store = LocHubStore.load(join7(config.projectDir, "Localization", "LocHub"), join7(config.projectDir, "Saved", "LocHub", "plural_forms.json"), join7(config.projectDir, "Saved", "LocHub", "native_culture.json"));
   const apiKey = config.ai.auth === "api" ? resolveApiKey(process.env) : void 0;
   const llm = createLlmClient(config.ai, resolve3(config.projectDir), apiKey);
   const { text: brief, sha1: briefSha1 } = readBriefFile(config.briefFile);

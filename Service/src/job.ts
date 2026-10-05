@@ -287,7 +287,7 @@ export async function runTranslateJob(store: LocHubStore, llm: LlmClient, cache:
   if (report.requested === 0) return report;
   const now = new Date().toISOString();
 
-  // 0. Exact TM reuse: the same English text already has a human-confirmed translation; no model call.
+  // 0. Exact TM reuse: the same source text already has a human-confirmed translation; no model call.
   // Check freshness before this batch's first putCell/appendEvent, not only in the store.save()
   // below — appendEvent is a plain append that a later 409 could not undo.
   store.assertFresh();

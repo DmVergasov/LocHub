@@ -183,7 +183,7 @@ const EXPORTABLE: Record<ReleasePolicy, ReadonlySet<string>> = {
   approved_only: new Set(['approved', 'edited', 'human_edit']),
 };
 
-// What Pull may write into the archive. Outdated text is withheld: the player sees English until it is redone.
+// What Pull may write into the archive. Outdated text is withheld: the player sees the source text until it is redone.
 export function exportForPull(store: LocHubStore, culture: Culture, policy: ReleasePolicy): ExportEntry[] {
   const out: ExportEntry[] = [];
   for (const unit of store.units.values()) {
